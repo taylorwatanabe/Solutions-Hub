@@ -16,11 +16,20 @@ Image URI after push:
 
 | Setting | Value |
 |---------|--------|
-| Cluster | `Solution Hub` (**new** Express Mode cluster) |
-| Service name | `Solution Hub` |
+| Cluster | `Solution-Hub` (**new** Express Mode cluster; ECS names cannot contain spaces) |
+| Service name | `Solution-Hub` |
 | Container port | `8080` |
 | Image | ECR URI above |
 | Health check | `GET /healthz` (also `/health`, `/ping`, `/api/health`) |
+| Public URL | `https://so-f58011ac242d43a99fb53eb9959c04df.ecs.us-east-2.on.aws` |
+
+One-shot create (already applied once):
+
+```powershell
+aws ecs create-express-gateway-service --region us-east-2 --cli-input-json file://scripts/express-create-input.json --monitor-mode TEXT-ONLY
+```
+
+CPU/memory use Fargate units (`1024` / `2048`), not `1` / `2`.
 
 ### Task environment (plain)
 

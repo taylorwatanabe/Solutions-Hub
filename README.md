@@ -47,17 +47,20 @@ python scripts/seed_from_csv.py path\to\dataset.csv
 
 | Resource | Value |
 |----------|--------|
-| Cluster | `Solution Hub` |
-| Service | `Solution Hub` |
+| Cluster | `Solution-Hub` |
+| Service | `Solution-Hub` |
 | ECR | `solution-hub` |
 | Region | `us-east-2` |
 | Port / health | `8080` / `/healthz` |
+| Public URL | https://so-f58011ac242d43a99fb53eb9959c04df.ecs.us-east-2.on.aws |
 
 ```powershell
 .\deploy-ecs.cmd
 ```
 
 CodeBuild: [buildspec.yml](buildspec.yml)
+
+Recreate Express Mode (if needed): `scripts/express-create-input.json`
 
 ## API
 

@@ -10,8 +10,8 @@ version: 0.2
 
 env:
   variables:
-    ECS_CLUSTER: Solution Hub
-    ECS_SERVICE: Solution Hub
+    ECS_CLUSTER: Solution-Hub
+    ECS_SERVICE: Solution-Hub
     ECR_REPO_NAME: solution-hub
 
 phases:

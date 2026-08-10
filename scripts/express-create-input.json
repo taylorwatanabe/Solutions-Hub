@@ -1,0 +1,26 @@
+{
+  "executionRoleArn": "arn:aws:iam::422799216424:role/ecsTaskExecutionRole",
+  "infrastructureRoleArn": "arn:aws:iam::422799216424:role/ecsInfrastructureRoleForExpressServices",
+  "serviceName": "Solution-Hub",
+  "cluster": "Solution-Hub",
+  "healthCheckPath": "/healthz",
+  "cpu": "1024",
+  "memory": "2048",
+  "primaryContainer": {
+    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub:latest",
+    "containerPort": 8080,
+    "environment": [
+      { "name": "AWS_REGION", "value": "us-east-2" },
+      { "name": "TRUST_PROXY_HEADERS", "value": "1" },
+      { "name": "ALLOW_LOCAL_DATA_STORAGE", "value": "1" }
+    ],
+    "awsLogsConfiguration": {
+      "logGroup": "/ecs/Solution-Hub",
+      "logStreamPrefix": "ecs"
+    }
+  },
+  "scalingTarget": {
+    "minTaskCount": 1,
+    "maxTaskCount": 3
+  }
+}
