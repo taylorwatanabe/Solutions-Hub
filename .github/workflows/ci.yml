@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Smoke test (local JSON store)
+        env:
+          ALLOW_LOCAL_DATA_STORAGE: "1"
+          SOLUTIONS_HUB_LOCAL_DATA: data/submissions.ci.json
+        run: |
+          cp data/submissions.example.json data/submissions.ci.json
+          python scripts/smoke_test.py

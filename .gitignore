@@ -1,0 +1,40 @@
+# Secrets / local env
+.env
+.env.*
+!.env.example
+Credentials/
+**/credentials.json
+**/token.json
+**/service-account*.json
+!*example*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local runtime data (keep examples)
+data/submissions.json
+data/*.local.json
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+tmp/
+temp/

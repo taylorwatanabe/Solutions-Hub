@@ -1,0 +1,33 @@
+# AWS CodeBuild — build image, push to ECR, redeploy ECS Express Mode service.
+#
+# Optional environment variables:
+#   ECS_CLUSTER   Solution Hub
+#   ECS_SERVICE   Solution Hub
+#   AWS_REGION    us-east-2
+#   ECR_REPO_NAME solution-hub
+
+version: 0.2
+
+env:
+  variables:
+    ECS_CLUSTER: Solution Hub
+    ECS_SERVICE: Solution Hub
+    ECR_REPO_NAME: solution-hub
+
+phases:
+  build:
+    commands:
+      - set -e
+      - export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-2}}"
+      - export ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+      - export REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+      - echo "Region=${AWS_DEFAULT_REGION} Account=${ACCOUNT_ID}"
+      - docker info >/dev/null 2>&1 || { echo "Docker daemon not reachable — enable Privileged mode."; exit 1; }
+      - echo "Logging in to ECR ${REPOSITORY_URI}"
+      - TOKEN=$(aws ecr get-login-password --region "$AWS_DEFAULT_REGION")
+      - printf '%s' "$TOKEN" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      - docker build --build-arg "BUILD_ID=${CODEBUILD_RESOLVED_SOURCE_VERSION:-unknown}" -t "${ECR_REPO_NAME}:latest" .
+      - docker tag "${ECR_REPO_NAME}:latest" "${REPOSITORY_URI}:latest"
+      - docker push "${REPOSITORY_URI}:latest"
+      - echo "Forcing new ECS deployment ${ECS_CLUSTER} / ${ECS_SERVICE}"
+      - aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment --region "$AWS_DEFAULT_REGION"
