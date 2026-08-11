@@ -67,10 +67,15 @@ _cached_token: Dict[str, Any] = {"token": "", "expires_at": 0.0}
 
 def _sheets_http_timeout() -> int:
     try:
-        # Hard ceiling so we never wait for the ALB 60s gateway timeout.
-        return max(5, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC")) or "12"))
+        return max(3, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC")) or "8"))
     except ValueError:
-        return 12
+        return 8
+
+
+def _sheets_timeout_tuple() -> Tuple[float, float]:
+    """(connect timeout, read timeout) for requests."""
+    read = float(_sheets_http_timeout())
+    return (min(5.0, read), read)
 
 
 def _sheets_cache_ttl() -> float:
@@ -161,20 +166,24 @@ def _google_access_token() -> str:
     from google.auth.transport.requests import Request
     from google.oauth2 import service_account
 
+    logger.info("Refreshing Google access token for Sheets")
     info = _service_account_info()
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=[SHEETS_SCOPE]
     )
-    timeout = _sheets_http_timeout()
+    timeout = _sheets_timeout_tuple()
     session = requests.Session()
     auth_request = Request(session=session)
 
-    # google-auth's Request forwards timeout= to requests; force it so token
-    # refresh cannot hang past the ALB gateway limit.
-    def _timed_request(url, method="GET", body=None, headers=None, **kwargs):
-        kwargs.setdefault("timeout", timeout)
+    def _timed_request(url, method="GET", body=None, headers=None, timeout=None, **kwargs):
         return Request.__call__(
-            auth_request, url, method=method, body=body, headers=headers, **kwargs
+            auth_request,
+            url,
+            method=method,
+            body=body,
+            headers=headers,
+            timeout=timeout if timeout is not None else _sheets_timeout_tuple(),
+            **kwargs,
         )
 
     auth_request.__call__ = _timed_request  # type: ignore[method-assign]
@@ -189,6 +198,7 @@ def _google_access_token() -> str:
     with _token_lock:
         _cached_token["token"] = token
         _cached_token["expires_at"] = expiry
+    logger.info("Google access token ready")
     return str(token)
 
 
@@ -196,11 +206,12 @@ def _sheets_rest_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict
     """Direct Sheets REST GET with a hard requests timeout (avoids hung httplib2)."""
     import requests
 
-    timeout = _sheets_http_timeout()
+    timeout = _sheets_timeout_tuple()
 
     def _do() -> Dict[str, Any]:
         url = f"https://sheets.googleapis.com/v4/{path}"
         headers = {"Authorization": f"Bearer {_google_access_token()}"}
+        logger.info("Sheets REST GET %s", path[:80])
         resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
         if resp.status_code >= 400:
             raise RuntimeError(f"Sheets REST {resp.status_code}: {resp.text[:300]}")
@@ -357,6 +368,9 @@ def _parse_data_range(a1: str) -> Tuple[str, int, str, Optional[int]]:
     return start_col.upper(), start_row, end_col.upper(), int(end_row) if end_row else None
 
 
+_sa_info_cache: Optional[Dict[str, Any]] = None
+
+
 def _ensure_gcp_credentials() -> None:
     from integrations.aws_gcp_sa_bootstrap import load_gcp_service_account_from_aws_secrets_manager
 
@@ -364,6 +378,10 @@ def _ensure_gcp_credentials() -> None:
 
 
 def _service_account_info() -> Dict[str, Any]:
+    global _sa_info_cache
+    if _sa_info_cache is not None:
+        return _sa_info_cache
+
     _ensure_gcp_credentials()
     raw = _strip(os.getenv("GCP_SERVICE_ACCOUNT_JSON"))
     if raw:
@@ -379,6 +397,7 @@ def _service_account_info() -> Dict[str, Any]:
             raise RuntimeError(f"GCP_SERVICE_ACCOUNT_JSON is not valid JSON: {e}") from e
         if not isinstance(parsed, dict) or parsed.get("type") != "service_account":
             raise RuntimeError("GCP_SERVICE_ACCOUNT_JSON must be a service_account key object")
+        _sa_info_cache = parsed
         return parsed
 
     key_file = _strip(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
@@ -389,6 +408,7 @@ def _service_account_info() -> Dict[str, Any]:
         parsed = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(parsed, dict) or parsed.get("type") != "service_account":
             raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS must be a service_account key file")
+        _sa_info_cache = parsed
         return parsed
 
     raise RuntimeError(
@@ -854,11 +874,13 @@ def _write_all_local(subs: List[Dict[str, Any]]) -> None:
 
 
 def list_submissions(department: Optional[str] = None) -> List[Dict[str, Any]]:
-    with _lock:
-        if _use_local_store():
+    # Never hold `_lock` across Sheets network I/O — that blocked /api/board
+    # behind a hung warm-up thread and made the UI time out with no server log line.
+    if _use_local_store():
+        with _lock:
             rows = _read_all_local()
-        else:
-            rows = _read_all_sheets()
+    else:
+        rows = _read_all_sheets()
     dept = _strip(department)
     if dept:
         rows = [r for r in rows if _strip(r.get("department")).lower() == dept.lower()]
@@ -926,77 +948,54 @@ def _month_bucket(dt: Optional[datetime]) -> Tuple[str, Tuple[int, int]]:
 
 
 def get_board(department: Optional[str] = None) -> Dict[str, Any]:
-    """Build the month-grouped board; hard-cap wait so ALB never 504s first."""
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+    rows = list_submissions(department=department)
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    month_sort: Dict[str, Tuple[int, int]] = {}
 
-    def _build() -> Dict[str, Any]:
-        rows = list_submissions(department=department)
-        buckets: Dict[str, List[Dict[str, Any]]] = {}
-        month_sort: Dict[str, Tuple[int, int]] = {}
-
-        for row in rows:
-            status = _normalize_status(str(row.get("status") or "Received"))
-            dt = _parse_submission_datetime(row)
-            label, sort_key = _month_bucket(dt)
-            enriched = {
-                **row,
-                "status": status,
-                "board_month": label,
-            }
-            if dt and not _strip(str(row.get("submitted_at") or "")):
-                enriched["submitted_at"] = dt.isoformat(sep=" ", timespec="minutes")
-            buckets.setdefault(label, []).append(enriched)
-            month_sort[label] = sort_key
-
-        def _col_sort(label: str) -> Tuple[int, int, int]:
-            y, m = month_sort.get(label, (0, 0))
-            if label == "Unknown date":
-                return (1, 0, 0)
-            return (0, -y, -m)
-
-        months = sorted(buckets.keys(), key=_col_sort)
-        columns = {m: buckets[m] for m in months}
-
-        by_dept: Dict[str, int] = {}
-        for row in rows:
-            d = _strip(row.get("department")) or "Unspecified"
-            by_dept[d] = by_dept.get(d, 0) + 1
-
-        return {
-            "group_by": "month",
-            "months": months,
-            "statuses": STATUSES,
-            "columns": columns,
-            "counts": {m: len(columns[m]) for m in months},
-            "department_counts": dict(
-                sorted(by_dept.items(), key=lambda kv: (-kv[1], kv[0]))
-            ),
-            "unknown": [],
-            "total": len(rows),
-            "source": {
-                "sheet_id": _sheet_id() if not _use_local_store() else None,
-                "range": _data_range()
-                if not _use_local_store() and _compact_mode()
-                else None,
-                "fields": _column_fields()
-                if not _use_local_store() and _compact_mode()
-                else None,
-                "mode": "local"
-                if _use_local_store()
-                else ("compact" if _compact_mode() else "full"),
-            },
+    for row in rows:
+        status = _normalize_status(str(row.get("status") or "Received"))
+        dt = _parse_submission_datetime(row)
+        label, sort_key = _month_bucket(dt)
+        enriched = {
+            **row,
+            "status": status,
+            "board_month": label,
         }
+        if dt and not _strip(str(row.get("submitted_at") or "")):
+            enriched["submitted_at"] = dt.isoformat(sep=" ", timespec="minutes")
+        buckets.setdefault(label, []).append(enriched)
+        month_sort[label] = sort_key
 
-    # Cached reads return instantly inside _build; only cold Sheets fetches need the cap.
-    deadline = float(_sheets_http_timeout()) + 8.0
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(_build)
-        try:
-            return fut.result(timeout=deadline)
-        except FuturesTimeout as e:
-            raise TimeoutError(
-                f"Board load exceeded {deadline:.0f}s waiting on Google Sheets"
-            ) from e
+    def _col_sort(label: str) -> Tuple[int, int, int]:
+        y, m = month_sort.get(label, (0, 0))
+        if label == "Unknown date":
+            return (1, 0, 0)
+        return (0, -y, -m)
+
+    months = sorted(buckets.keys(), key=_col_sort)
+    columns = {m: buckets[m] for m in months}
+
+    by_dept: Dict[str, int] = {}
+    for row in rows:
+        d = _strip(row.get("department")) or "Unspecified"
+        by_dept[d] = by_dept.get(d, 0) + 1
+
+    return {
+        "group_by": "month",
+        "months": months,
+        "statuses": STATUSES,
+        "columns": columns,
+        "counts": {m: len(columns[m]) for m in months},
+        "department_counts": dict(sorted(by_dept.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "unknown": [],
+        "total": len(rows),
+        "source": {
+            "sheet_id": _sheet_id() if not _use_local_store() else None,
+            "range": _data_range() if not _use_local_store() and _compact_mode() else None,
+            "fields": _column_fields() if not _use_local_store() and _compact_mode() else None,
+            "mode": "local" if _use_local_store() else ("compact" if _compact_mode() else "full"),
+        },
+    }
 
 
 def create_submission(payload: Dict[str, Any]) -> Dict[str, Any]:

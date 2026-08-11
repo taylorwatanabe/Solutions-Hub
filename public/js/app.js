@@ -185,7 +185,7 @@ async function loadBoard() {
   const dept = els.deptFilter.value;
   const qs = dept ? `?department=${encodeURIComponent(dept)}` : "";
   try {
-    const board = await api(`/api/board${qs}`, { timeoutMs: 20000, maxAttempts: 1 });
+    const board = await api(`/api/board${qs}`, { timeoutMs: 25000, maxAttempts: 2 });
     if (!board.months?.length && !Object.keys(board.columns || {}).length) {
       els.kanban.innerHTML = "";
       els.boardError.hidden = false;

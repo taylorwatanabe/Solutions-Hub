@@ -60,8 +60,14 @@ def build_info():
 @app.get("/api/board")
 def api_board():
     department = (request.args.get("department") or "").strip() or None
+    logger.info("GET /api/board start department=%r", department)
     try:
         board = sheets_store.get_board(department=department)
+        logger.info(
+            "GET /api/board ok total=%s months=%s",
+            board.get("total"),
+            board.get("months"),
+        )
         return jsonify(board)
     except Exception as e:
         logger.exception("GET /api/board failed")
@@ -74,6 +80,36 @@ def api_board():
                 }
             ), 504
         return jsonify({"error": msg}), 500
+
+
+@app.get("/api/diag/sheets")
+def api_diag_sheets():
+    """Quick connectivity check for Google Sheets (no full board build)."""
+    import time as _time
+
+    started = _time.time()
+    try:
+        tab = sheets_store._resolve_tab_title_fast(sheets_store._sheet_id())
+        token_preview = sheets_store._google_access_token()[:12] + "…"
+        return jsonify(
+            {
+                "ok": True,
+                "tab": tab,
+                "token_prefix": token_preview,
+                "elapsed_ms": int((_time.time() - started) * 1000),
+                "sheet_id": sheets_store._sheet_id(),
+                "gid": sheets_store._sheet_gid(),
+            }
+        )
+    except Exception as e:
+        logger.exception("GET /api/diag/sheets failed")
+        return jsonify(
+            {
+                "ok": False,
+                "error": str(e),
+                "elapsed_ms": int((_time.time() - started) * 1000),
+            }
+        ), 500
 
 
 @app.get("/api/submissions")
@@ -185,17 +221,20 @@ else:
     # Warm Sheets client/cache in the background so the first board request
     # is less likely to hit the gateway 504.
     def _warm_sheets_cache() -> None:
+        import sys
         import time as _time
 
+        print("sheets-warm: starting", file=sys.stderr, flush=True)
         for attempt in range(1, 4):
             try:
+                print(f"sheets-warm: attempt {attempt}", file=sys.stderr, flush=True)
                 sheets_store.get_board()
+                print(f"sheets-warm: success on attempt {attempt}", file=sys.stderr, flush=True)
                 logger.info("Warmed Sheets board cache (attempt %d)", attempt)
                 return
-            except Exception:
-                logger.exception(
-                    "Sheets warm-up failed (attempt %d/3)", attempt
-                )
+            except Exception as e:
+                print(f"sheets-warm: failed attempt {attempt}: {e}", file=sys.stderr, flush=True)
+                logger.exception("Sheets warm-up failed (attempt %d/3)", attempt)
                 _time.sleep(min(5, attempt * 2))
 
     import threading

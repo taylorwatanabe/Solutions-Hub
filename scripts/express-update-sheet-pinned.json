@@ -5,7 +5,7 @@
   "cpu": "1024",
   "memory": "2048",
   "primaryContainer": {
-    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:b561f6c89143a50c0585c3e17014c446cd64d2bf79c90d1c38e63e609b192788",
+    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:fdb352efc854e76974ebb2a4a657978567c7e4083e8af2f83f5bb8d8fdcaee82",
     "containerPort": 8080,
     "environment": [
       { "name": "AWS_REGION", "value": "us-east-2" },
@@ -15,7 +15,7 @@
       { "name": "SOLUTIONS_HUB_DATA_RANGE", "value": "AI2:AK" },
       { "name": "SOLUTIONS_HUB_COLUMN_FIELDS", "value": "status,department,problem" },
       { "name": "SOLUTIONS_HUB_SHEETS_READONLY", "value": "1" },
-      { "name": "SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC", "value": "12" },
+      { "name": "SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC", "value": "8" },
       { "name": "SOLUTIONS_HUB_SHEETS_CACHE_SEC", "value": "300" },
       { "name": "SOLUTIONS_HUB_SHEETS_RETRIES", "value": "1" }
     ],
@@ -30,8 +30,5 @@
       "logStreamPrefix": "ecs"
     }
   },
-  "scalingTarget": {
-    "minTaskCount": 1,
-    "maxTaskCount": 3
-  }
+  "scalingTarget": { "minTaskCount": 1, "maxTaskCount": 3 }
 }
