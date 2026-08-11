@@ -5,7 +5,7 @@
     "cpu":  "1024",
     "memory":  "2048",
     "primaryContainer":  {
-                             "image":  "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:061f29e33c909df2e4993e8c2b1f15403202e4570caa3d1a67ef5a4d23e592d7",
+                             "image":  "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:a07127e6591a31f267d42d2cb774abab67f272d21ba3f4ec74631aebfd70de02",
                              "containerPort":  8080,
                              "environment":  [
                                                  {
