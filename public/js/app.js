@@ -40,33 +40,48 @@ function truncate(text, n = 140) {
 }
 
 async function api(path, options = {}) {
-  const { retry = true, headers: extraHeaders, ...fetchOptions } = options;
-  const maxAttempts = retry === false ? 1 : 3;
+  const {
+    retry = true,
+    headers: extraHeaders,
+    timeoutMs = 45000,
+    maxAttempts: maxAttemptsOpt,
+    ...fetchOptions
+  } = options;
+  const maxAttempts = maxAttemptsOpt ?? (retry === false ? 1 : 2);
   let lastErr = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(path, {
         headers: { "Content-Type": "application/json", ...(extraHeaders || {}) },
+        signal: controller.signal,
         ...fetchOptions,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const msg = data.error || `Request failed (${res.status})`;
         if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxAttempts) {
-          await new Promise((r) => setTimeout(r, 700 * attempt));
+          await new Promise((r) => setTimeout(r, 500 * attempt));
           continue;
         }
         throw new Error(msg);
       }
       return data;
     } catch (err) {
-      lastErr = err;
-      const isHttpErr = err instanceof Error && /Request failed \(\d+\)/.test(err.message);
+      if (err && err.name === "AbortError") {
+        lastErr = new Error("Board request timed out waiting for Google Sheets. Click Refresh to try again.");
+      } else {
+        lastErr = err;
+      }
+      const isHttpErr = lastErr instanceof Error && /Request failed \(\d+\)/.test(lastErr.message);
       if (!isHttpErr && attempt < maxAttempts) {
-        await new Promise((r) => setTimeout(r, 700 * attempt));
+        await new Promise((r) => setTimeout(r, 500 * attempt));
         continue;
       }
-      throw err;
+      throw lastErr;
+    } finally {
+      clearTimeout(timer);
     }
   }
   throw lastErr || new Error("Request failed");
@@ -166,12 +181,20 @@ function renderBoard(board) {
 
 async function loadBoard() {
   els.boardError.hidden = true;
+  els.kanban.innerHTML = `<p class="board-loading">Loading board…</p>`;
   const dept = els.deptFilter.value;
   const qs = dept ? `?department=${encodeURIComponent(dept)}` : "";
   try {
-    const board = await api(`/api/board${qs}`);
+    const board = await api(`/api/board${qs}`, { timeoutMs: 20000, maxAttempts: 1 });
+    if (!board.months?.length && !Object.keys(board.columns || {}).length) {
+      els.kanban.innerHTML = "";
+      els.boardError.hidden = false;
+      els.boardError.textContent = "No submissions found for this filter.";
+      return;
+    }
     renderBoard(board);
   } catch (err) {
+    els.kanban.innerHTML = "";
     els.boardError.hidden = false;
     els.boardError.textContent = err.message || String(err);
   }

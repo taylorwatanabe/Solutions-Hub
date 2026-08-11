@@ -108,8 +108,11 @@ body {
   object-fit: contain;
   flex-shrink: 0;
   background: transparent;
-  /* Blend any residual light canvas into the page gradient */
+  border: 0;
+  box-shadow: none;
+  /* White/off-white canvas in the PNG blends into the page gradient */
   mix-blend-mode: multiply;
+  isolation: isolate;
 }
 
 .brand-copy {
@@ -257,6 +260,12 @@ select {
   background: #f8e4e4;
   color: var(--danger);
   border: 1px solid #e2b4b4;
+}
+
+.board-loading {
+  margin: 1.5rem 0;
+  color: var(--ink-muted);
+  font-size: 0.95rem;
 }
 
 .kanban {

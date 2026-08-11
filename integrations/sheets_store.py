@@ -59,27 +59,32 @@ _tab_cache: Dict[str, str] = {}
 _sheets_svc = None
 _sheets_svc_lock = threading.Lock()
 _rows_cache: Dict[str, Any] = {"ts": 0.0, "key": "", "rows": None}
+_refresh_lock = threading.Lock()
+_refreshing = False
+_token_lock = threading.Lock()
+_cached_token: Dict[str, Any] = {"token": "", "expires_at": 0.0}
 
 
 def _sheets_http_timeout() -> int:
     try:
-        return max(10, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC")) or "25"))
+        # Hard ceiling so we never wait for the ALB 60s gateway timeout.
+        return max(5, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC")) or "12"))
     except ValueError:
-        return 25
+        return 12
 
 
 def _sheets_cache_ttl() -> float:
     try:
-        return max(0.0, float(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_CACHE_SEC")) or "60"))
+        return max(0.0, float(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_CACHE_SEC")) or "300"))
     except ValueError:
-        return 60.0
+        return 300.0
 
 
 def _sheets_retries() -> int:
     try:
-        return max(1, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_RETRIES")) or "2"))
+        return max(1, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_RETRIES")) or "1"))
     except ValueError:
-        return 2
+        return 1
 
 
 def _invalidate_rows_cache() -> None:
@@ -106,12 +111,16 @@ def _call_sheets(label: str, fn):
                 e,
             )
             if attempt < attempts:
-                time.sleep(min(8.0, 0.6 * (2 ** (attempt - 1))))
+                time.sleep(min(2.0, 0.4 * (2 ** (attempt - 1))))
         except Exception as e:
-            # googleapiclient wraps some transport errors
+            # googleapiclient / requests wraps some transport errors
             name = type(e).__name__
             msg = str(e).lower()
-            if "timed out" in msg or "timeout" in msg or name in ("TimeoutError", "SSLError"):
+            if (
+                "timed out" in msg
+                or "timeout" in msg
+                or name in ("TimeoutError", "SSLError", "ReadTimeout", "ConnectTimeout")
+            ):
                 last = e
                 logger.warning(
                     "Sheets %s timed out/failed (attempt %d/%d): %s",
@@ -121,11 +130,116 @@ def _call_sheets(label: str, fn):
                     e,
                 )
                 if attempt < attempts:
-                    time.sleep(min(8.0, 0.6 * (2 ** (attempt - 1))))
+                    time.sleep(min(2.0, 0.4 * (2 ** (attempt - 1))))
                     continue
             raise
     assert last is not None
     raise last
+
+
+def _rows_cache_key() -> str:
+    return "|".join(
+        [
+            _sheet_id(),
+            _sheet_gid(),
+            _sheet_tab_env(),
+            _data_range(),
+            ",".join(_column_fields()),
+            "compact" if _compact_mode() else "full",
+        ]
+    )
+
+
+def _google_access_token() -> str:
+    """Cached service-account access token for Sheets REST calls."""
+    now = time.time()
+    with _token_lock:
+        if _cached_token["token"] and now < float(_cached_token["expires_at"]) - 60:
+            return str(_cached_token["token"])
+
+    import requests
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
+
+    info = _service_account_info()
+    creds = service_account.Credentials.from_service_account_info(
+        info, scopes=[SHEETS_SCOPE]
+    )
+    timeout = _sheets_http_timeout()
+    session = requests.Session()
+    auth_request = Request(session=session)
+
+    # google-auth's Request forwards timeout= to requests; force it so token
+    # refresh cannot hang past the ALB gateway limit.
+    def _timed_request(url, method="GET", body=None, headers=None, **kwargs):
+        kwargs.setdefault("timeout", timeout)
+        return Request.__call__(
+            auth_request, url, method=method, body=body, headers=headers, **kwargs
+        )
+
+    auth_request.__call__ = _timed_request  # type: ignore[method-assign]
+    creds.refresh(auth_request)
+    token = creds.token
+    expiry = time.time() + 3500
+    if getattr(creds, "expiry", None) is not None:
+        try:
+            expiry = creds.expiry.timestamp()
+        except Exception:
+            pass
+    with _token_lock:
+        _cached_token["token"] = token
+        _cached_token["expires_at"] = expiry
+    return str(token)
+
+
+def _sheets_rest_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Direct Sheets REST GET with a hard requests timeout (avoids hung httplib2)."""
+    import requests
+
+    timeout = _sheets_http_timeout()
+
+    def _do() -> Dict[str, Any]:
+        url = f"https://sheets.googleapis.com/v4/{path}"
+        headers = {"Authorization": f"Bearer {_google_access_token()}"}
+        resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Sheets REST {resp.status_code}: {resp.text[:300]}")
+        return resp.json()
+
+    return _call_sheets(f"rest.get:{path[:48]}", _do)
+
+
+def _resolve_tab_title_fast(spreadsheet_id: str) -> str:
+    """Resolve tab title via a lightweight REST metadata call (or env override)."""
+    env_tab = _sheet_tab_env()
+    if env_tab:
+        return env_tab
+
+    gid = _sheet_gid()
+    cache_key = f"{spreadsheet_id}:{gid}"
+    if cache_key in _tab_cache:
+        return _tab_cache[cache_key]
+
+    meta = _sheets_rest_get(
+        f"spreadsheets/{spreadsheet_id}",
+        params={"fields": "sheets.properties(sheetId,title)"},
+    )
+    sheets = meta.get("sheets") or []
+    if gid:
+        for sh in sheets:
+            props = sh.get("properties") or {}
+            if str(props.get("sheetId")) == str(gid):
+                title = str(props.get("title") or "Sheet1")
+                _tab_cache[cache_key] = title
+                logger.info("Resolved sheet gid %s → tab %r", gid, title)
+                return title
+        logger.warning("Sheet gid %s not found; falling back to first tab", gid)
+
+    if sheets:
+        title = str((sheets[0].get("properties") or {}).get("title") or "Sheet1")
+        _tab_cache[cache_key] = title
+        return title
+    return "Sheet1"
 
 
 def _strip(value: Optional[str]) -> str:
@@ -326,35 +440,162 @@ def _escape_tab(tab: str) -> str:
 
 
 def _resolve_tab_title(svc, spreadsheet_id: str) -> str:
-    env_tab = _sheet_tab_env()
-    if env_tab:
-        return env_tab
+    # Prefer the fast REST resolver (hard timeout). ``svc`` kept for call-site compat.
+    return _resolve_tab_title_fast(spreadsheet_id)
 
-    gid = _sheet_gid()
-    cache_key = f"{spreadsheet_id}:{gid}"
-    if cache_key in _tab_cache:
-        return _tab_cache[cache_key]
 
-    meta = _call_sheets(
-        "spreadsheets.get",
-        lambda: svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute(),
-    )
-    sheets = meta.get("sheets") or []
-    if gid:
-        for sh in sheets:
-            props = sh.get("properties") or {}
-            if str(props.get("sheetId")) == str(gid):
-                title = str(props.get("title") or "Sheet1")
-                _tab_cache[cache_key] = title
-                logger.info("Resolved sheet gid %s → tab %r", gid, title)
-                return title
-        logger.warning("Sheet gid %s not found; falling back to first tab", gid)
+def _read_compact_sheets() -> List[Dict[str, Any]]:
+    from urllib.parse import quote
 
-    if sheets:
-        title = str((sheets[0].get("properties") or {}).get("title") or "Sheet1")
-        _tab_cache[cache_key] = title
-        return title
-    return "Sheet1"
+    sheet_id = _sheet_id()
+    tab = _resolve_tab_title_fast(sheet_id)
+    start_col, start_row, end_col, end_row = _parse_data_range(_data_range())
+    fields = _column_fields()
+
+    expected_width = _col_letters_to_index(end_col) - _col_letters_to_index(start_col) + 1
+    if len(fields) != expected_width:
+        logger.warning(
+            "SOLUTIONS_HUB_COLUMN_FIELDS has %d names but range %s spans %d columns",
+            len(fields),
+            _data_range(),
+            expected_width,
+        )
+
+    a1 = f"'{_escape_tab(tab)}'!{start_col}{start_row}:{end_col}"
+    if end_row:
+        a1 = f"'{_escape_tab(tab)}'!{start_col}{start_row}:{end_col}{end_row}"
+
+    encoded = quote(a1, safe="")
+    result = _sheets_rest_get(f"spreadsheets/{sheet_id}/values/{encoded}")
+    values = result.get("values") or []
+    out: List[Dict[str, Any]] = []
+    for offset, row in enumerate(values):
+        if not any(_strip(str(c)) for c in row):
+            continue
+        sheet_row = start_row + offset
+        out.append(_compact_row_to_submission(row, fields, sheet_row))
+    logger.info("Loaded %d rows from %s (%s)", len(out), a1, fields)
+    return out
+
+
+def _a1_full_tab(tab: str, end_col: str = "R") -> str:
+    return f"'{_escape_tab(tab)}'!A:{end_col}"
+
+
+def _row_to_submission(row: List[str], headers: List[str]) -> Dict[str, Any]:
+    data = {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
+    try:
+        data["upvotes"] = int(str(data.get("upvotes") or "0").strip() or "0")
+    except ValueError:
+        data["upvotes"] = 0
+    if "status" in data:
+        data["status"] = _normalize_status(str(data.get("status") or ""))
+    return data
+
+
+def _submission_to_row(sub: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for key in HEADERS:
+        val = sub.get(key, "")
+        if key == "upvotes":
+            out.append(str(int(val or 0)))
+        else:
+            out.append("" if val is None else str(val))
+    return out
+
+
+def _read_full_sheets() -> List[Dict[str, Any]]:
+    from urllib.parse import quote
+
+    sheet_id = _sheet_id()
+    tab = _resolve_tab_title_fast(sheet_id)
+    a1 = _a1_full_tab(tab)
+    encoded = quote(a1, safe="")
+    result = _sheets_rest_get(f"spreadsheets/{sheet_id}/values/{encoded}")
+    values = result.get("values") or []
+    if not values:
+        return []
+    headers = [str(h).strip() for h in values[0]]
+    if not headers or headers[0].lower() != "id":
+        logger.warning("Sheet missing header row; assuming canonical HEADERS order")
+        headers = list(HEADERS)
+        rows = values
+    else:
+        rows = values[1:]
+    return [
+        _row_to_submission(row, headers)
+        for row in rows
+        if any(str(c).strip() for c in row)
+    ]
+
+
+def _fetch_all_sheets_uncached() -> List[Dict[str, Any]]:
+    return _read_compact_sheets() if _compact_mode() else _read_full_sheets()
+
+
+def _background_refresh_rows(cache_key: str) -> None:
+    global _refreshing
+    try:
+        rows = _fetch_all_sheets_uncached()
+        with _lock:
+            _rows_cache["ts"] = time.time()
+            _rows_cache["key"] = cache_key
+            _rows_cache["rows"] = [dict(r) for r in rows]
+        logger.info("Background Sheets refresh stored %d rows", len(rows))
+    except Exception:
+        logger.exception("Background Sheets refresh failed")
+    finally:
+        with _refresh_lock:
+            _refreshing = False
+
+
+def _read_all_sheets() -> List[Dict[str, Any]]:
+    """
+    Fast path: serve memory cache immediately (even if slightly stale) and
+    refresh in the background. Only block on a cold cache.
+    """
+    global _refreshing
+    cache_key = _rows_cache_key()
+    ttl = _sheets_cache_ttl()
+    now = time.time()
+
+    with _lock:
+        cached_rows = _rows_cache["rows"]
+        cached_key = _rows_cache["key"]
+        cached_ts = float(_rows_cache["ts"])
+        if cached_rows is not None and cached_key == cache_key:
+            age = now - cached_ts
+            fresh = ttl <= 0 or age < ttl
+            stale_copy = [dict(r) for r in cached_rows]
+        else:
+            fresh = False
+            stale_copy = None
+
+    if stale_copy is not None:
+        if not fresh:
+            with _refresh_lock:
+                if not _refreshing:
+                    _refreshing = True
+                    threading.Thread(
+                        target=_background_refresh_rows,
+                        args=(cache_key,),
+                        name="sheets-refresh",
+                        daemon=True,
+                    ).start()
+            logger.info(
+                "Serving stale Sheets cache (age=%.1fs, %d rows) while refreshing",
+                now - cached_ts,
+                len(stale_copy),
+            )
+        return stale_copy
+
+    # Cold cache — must fetch once (with hard timeout).
+    rows = _fetch_all_sheets_uncached()
+    with _lock:
+        _rows_cache["ts"] = time.time()
+        _rows_cache["key"] = cache_key
+        _rows_cache["rows"] = [dict(r) for r in rows]
+    return rows
 
 
 def _normalize_status(raw: str) -> str:
@@ -418,133 +659,6 @@ def _compact_row_to_submission(
     if not sub.get("status"):
         sub["status"] = "Received"
     return sub
-
-
-def _read_compact_sheets() -> List[Dict[str, Any]]:
-    sheet_id = _sheet_id()
-    svc = _sheets_service()
-    tab = _resolve_tab_title(svc, sheet_id)
-    start_col, start_row, end_col, end_row = _parse_data_range(_data_range())
-    fields = _column_fields()
-
-    expected_width = _col_letters_to_index(end_col) - _col_letters_to_index(start_col) + 1
-    if len(fields) != expected_width:
-        logger.warning(
-            "SOLUTIONS_HUB_COLUMN_FIELDS has %d names but range %s spans %d columns",
-            len(fields),
-            _data_range(),
-            expected_width,
-        )
-
-    a1 = f"'{_escape_tab(tab)}'!{start_col}{start_row}:{end_col}"
-    if end_row:
-        a1 = f"'{_escape_tab(tab)}'!{start_col}{start_row}:{end_col}{end_row}"
-
-    result = _call_sheets(
-        "values.get.compact",
-        lambda: svc.spreadsheets()
-        .values()
-        .get(spreadsheetId=sheet_id, range=a1)
-        .execute(),
-    )
-    values = result.get("values") or []
-    out: List[Dict[str, Any]] = []
-    for offset, row in enumerate(values):
-        if not any(_strip(str(c)) for c in row):
-            continue
-        sheet_row = start_row + offset
-        out.append(_compact_row_to_submission(row, fields, sheet_row))
-    logger.info("Loaded %d rows from %s (%s)", len(out), a1, fields)
-    return out
-
-
-def _a1_full_tab(tab: str, end_col: str = "R") -> str:
-    return f"'{_escape_tab(tab)}'!A:{end_col}"
-
-
-def _row_to_submission(row: List[str], headers: List[str]) -> Dict[str, Any]:
-    data = {headers[i]: (row[i] if i < len(row) else "") for i in range(len(headers))}
-    try:
-        data["upvotes"] = int(str(data.get("upvotes") or "0").strip() or "0")
-    except ValueError:
-        data["upvotes"] = 0
-    if "status" in data:
-        data["status"] = _normalize_status(str(data.get("status") or ""))
-    return data
-
-
-def _submission_to_row(sub: Dict[str, Any]) -> List[str]:
-    out: List[str] = []
-    for key in HEADERS:
-        val = sub.get(key, "")
-        if key == "upvotes":
-            out.append(str(int(val or 0)))
-        else:
-            out.append("" if val is None else str(val))
-    return out
-
-
-def _read_full_sheets() -> List[Dict[str, Any]]:
-    sheet_id = _sheet_id()
-    svc = _sheets_service()
-    tab = _resolve_tab_title(svc, sheet_id)
-    result = _call_sheets(
-        "values.get.full",
-        lambda: svc.spreadsheets()
-        .values()
-        .get(spreadsheetId=sheet_id, range=_a1_full_tab(tab))
-        .execute(),
-    )
-    values = result.get("values") or []
-    if not values:
-        return []
-    headers = [str(h).strip() for h in values[0]]
-    if not headers or headers[0].lower() != "id":
-        logger.warning("Sheet missing header row; assuming canonical HEADERS order")
-        headers = list(HEADERS)
-        rows = values
-    else:
-        rows = values[1:]
-    return [
-        _row_to_submission(row, headers)
-        for row in rows
-        if any(str(c).strip() for c in row)
-    ]
-
-
-def _read_all_sheets() -> List[Dict[str, Any]]:
-    cache_key = "|".join(
-        [
-            _sheet_id(),
-            _sheet_gid(),
-            _sheet_tab_env(),
-            _data_range(),
-            ",".join(_column_fields()),
-            "compact" if _compact_mode() else "full",
-        ]
-    )
-    ttl = _sheets_cache_ttl()
-    now = time.time()
-    stale: Optional[List[Dict[str, Any]]] = None
-    with _lock:
-        if _rows_cache["rows"] is not None and _rows_cache["key"] == cache_key:
-            stale = [dict(r) for r in _rows_cache["rows"]]
-            if ttl > 0 and now - float(_rows_cache["ts"]) < ttl:
-                return stale
-
-    try:
-        rows = _read_compact_sheets() if _compact_mode() else _read_full_sheets()
-    except Exception:
-        if stale is not None:
-            logger.warning("Sheets read failed; serving stale cache (%d rows)", len(stale))
-            return stale
-        raise
-
-    with _lock:
-        _rows_cache["ts"] = time.time()
-        _rows_cache["key"] = cache_key
-        _rows_cache["rows"] = [dict(r) for r in rows]
-    return rows
 
 
 def _update_compact_row(sub: Dict[str, Any]) -> None:
@@ -812,56 +926,77 @@ def _month_bucket(dt: Optional[datetime]) -> Tuple[str, Tuple[int, int]]:
 
 
 def get_board(department: Optional[str] = None) -> Dict[str, Any]:
-    rows = list_submissions(department=department)
-    buckets: Dict[str, List[Dict[str, Any]]] = {}
-    month_sort: Dict[str, Tuple[int, int]] = {}
+    """Build the month-grouped board; hard-cap wait so ALB never 504s first."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-    for row in rows:
-        status = _normalize_status(str(row.get("status") or "Received"))
-        dt = _parse_submission_datetime(row)
-        label, sort_key = _month_bucket(dt)
-        enriched = {
-            **row,
-            "status": status,
-            "board_month": label,
+    def _build() -> Dict[str, Any]:
+        rows = list_submissions(department=department)
+        buckets: Dict[str, List[Dict[str, Any]]] = {}
+        month_sort: Dict[str, Tuple[int, int]] = {}
+
+        for row in rows:
+            status = _normalize_status(str(row.get("status") or "Received"))
+            dt = _parse_submission_datetime(row)
+            label, sort_key = _month_bucket(dt)
+            enriched = {
+                **row,
+                "status": status,
+                "board_month": label,
+            }
+            if dt and not _strip(str(row.get("submitted_at") or "")):
+                enriched["submitted_at"] = dt.isoformat(sep=" ", timespec="minutes")
+            buckets.setdefault(label, []).append(enriched)
+            month_sort[label] = sort_key
+
+        def _col_sort(label: str) -> Tuple[int, int, int]:
+            y, m = month_sort.get(label, (0, 0))
+            if label == "Unknown date":
+                return (1, 0, 0)
+            return (0, -y, -m)
+
+        months = sorted(buckets.keys(), key=_col_sort)
+        columns = {m: buckets[m] for m in months}
+
+        by_dept: Dict[str, int] = {}
+        for row in rows:
+            d = _strip(row.get("department")) or "Unspecified"
+            by_dept[d] = by_dept.get(d, 0) + 1
+
+        return {
+            "group_by": "month",
+            "months": months,
+            "statuses": STATUSES,
+            "columns": columns,
+            "counts": {m: len(columns[m]) for m in months},
+            "department_counts": dict(
+                sorted(by_dept.items(), key=lambda kv: (-kv[1], kv[0]))
+            ),
+            "unknown": [],
+            "total": len(rows),
+            "source": {
+                "sheet_id": _sheet_id() if not _use_local_store() else None,
+                "range": _data_range()
+                if not _use_local_store() and _compact_mode()
+                else None,
+                "fields": _column_fields()
+                if not _use_local_store() and _compact_mode()
+                else None,
+                "mode": "local"
+                if _use_local_store()
+                else ("compact" if _compact_mode() else "full"),
+            },
         }
-        if dt and not _strip(str(row.get("submitted_at") or "")):
-            # Compact sheet often stores timestamp in the mapped "problem" column.
-            enriched["submitted_at"] = dt.isoformat(sep=" ", timespec="minutes")
-        buckets.setdefault(label, []).append(enriched)
-        month_sort[label] = sort_key
 
-    # Newest month first; "Unknown date" last.
-    def _col_sort(label: str) -> Tuple[int, int, int]:
-        y, m = month_sort.get(label, (0, 0))
-        if label == "Unknown date":
-            return (1, 0, 0)
-        return (0, -y, -m)
-
-    months = sorted(buckets.keys(), key=_col_sort)
-    columns = {m: buckets[m] for m in months}
-
-    by_dept: Dict[str, int] = {}
-    for row in rows:
-        d = _strip(row.get("department")) or "Unspecified"
-        by_dept[d] = by_dept.get(d, 0) + 1
-
-    return {
-        "group_by": "month",
-        "months": months,
-        "statuses": STATUSES,
-        "columns": columns,
-        "counts": {m: len(columns[m]) for m in months},
-        "department_counts": dict(sorted(by_dept.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "unknown": [],
-        "total": len(rows),
-        "source": {
-            "sheet_id": _sheet_id() if not _use_local_store() else None,
-            "range": _data_range() if not _use_local_store() and _compact_mode() else None,
-            "fields": _column_fields() if not _use_local_store() and _compact_mode() else None,
-            "mode": "local" if _use_local_store() else ("compact" if _compact_mode() else "full"),
-        },
-    }
+    # Cached reads return instantly inside _build; only cold Sheets fetches need the cap.
+    deadline = float(_sheets_http_timeout()) + 8.0
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(_build)
+        try:
+            return fut.result(timeout=deadline)
+        except FuturesTimeout as e:
+            raise TimeoutError(
+                f"Board load exceeded {deadline:.0f}s waiting on Google Sheets"
+            ) from e
 
 
 def create_submission(payload: Dict[str, Any]) -> Dict[str, Any]:

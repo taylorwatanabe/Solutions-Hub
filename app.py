@@ -65,7 +65,15 @@ def api_board():
         return jsonify(board)
     except Exception as e:
         logger.exception("GET /api/board failed")
-        return jsonify({"error": str(e)}), 500
+        msg = str(e)
+        lowered = msg.lower()
+        if "timed out" in lowered or "timeout" in lowered:
+            return jsonify(
+                {
+                    "error": "Google Sheets timed out. Click Refresh to try again.",
+                }
+            ), 504
+        return jsonify({"error": msg}), 500
 
 
 @app.get("/api/submissions")
@@ -173,3 +181,23 @@ def js(filename: str):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=os.getenv("FLASK_DEBUG") == "1")
+else:
+    # Warm Sheets client/cache in the background so the first board request
+    # is less likely to hit the gateway 504.
+    def _warm_sheets_cache() -> None:
+        import time as _time
+
+        for attempt in range(1, 4):
+            try:
+                sheets_store.get_board()
+                logger.info("Warmed Sheets board cache (attempt %d)", attempt)
+                return
+            except Exception:
+                logger.exception(
+                    "Sheets warm-up failed (attempt %d/3)", attempt
+                )
+                _time.sleep(min(5, attempt * 2))
+
+    import threading
+
+    threading.Thread(target=_warm_sheets_cache, name="sheets-warm", daemon=True).start()

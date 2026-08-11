@@ -1,55 +1,37 @@
-﻿{
-    "serviceArn":  "arn:aws:ecs:us-east-2:422799216424:service/Solution-Hub/Solution-Hub",
-    "executionRoleArn":  "arn:aws:iam::422799216424:role/ecsTaskExecutionRole",
-    "healthCheckPath":  "/healthz",
-    "cpu":  "1024",
-    "memory":  "2048",
-    "primaryContainer":  {
-                             "image":  "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:a07127e6591a31f267d42d2cb774abab67f272d21ba3f4ec74631aebfd70de02",
-                             "containerPort":  8080,
-                             "environment":  [
-                                                 {
-                                                     "name":  "AWS_REGION",
-                                                     "value":  "us-east-2"
-                                                 },
-                                                 {
-                                                     "name":  "TRUST_PROXY_HEADERS",
-                                                     "value":  "1"
-                                                 },
-                                                 {
-                                                     "name":  "SOLUTIONS_HUB_SHEET_ID",
-                                                     "value":  "1sR1CTeznF4-8Az3WhGwgaAI4eMD6JEfAUhzgVpEvRSs"
-                                                 },
-                                                 {
-                                                     "name":  "SOLUTIONS_HUB_SHEET_GID",
-                                                     "value":  "439459761"
-                                                 },
-                                                 {
-                                                     "name":  "SOLUTIONS_HUB_DATA_RANGE",
-                                                     "value":  "AI2:AK"
-                                                 },
-                                                 {
-                                                     "name":  "SOLUTIONS_HUB_COLUMN_FIELDS",
-                                                     "value":  "status,department,problem"
-                                                 },
-                                                 {
-                                                     "name":  "SOLUTIONS_HUB_SHEETS_READONLY",
-                                                     "value":  "1"
-                                                 }
-                                             ],
-                             "secrets":  [
-                                             {
-                                                 "name":  "AWS_GCP_SERVICE_ACCOUNT_SECRET_ID",
-                                                 "valueFrom":  "arn:aws:secretsmanager:us-east-2:422799216424:secret:GCP_Service_Account_Vertex_AI-eeifEw"
-                                             }
-                                         ],
-                             "awsLogsConfiguration":  {
-                                                          "logGroup":  "/ecs/Solution-Hub",
-                                                          "logStreamPrefix":  "ecs"
-                                                      }
-                         },
-    "scalingTarget":  {
-                          "minTaskCount":  1,
-                          "maxTaskCount":  3
-                      }
+{
+  "serviceArn": "arn:aws:ecs:us-east-2:422799216424:service/Solution-Hub/Solution-Hub",
+  "executionRoleArn": "arn:aws:iam::422799216424:role/ecsTaskExecutionRole",
+  "healthCheckPath": "/healthz",
+  "cpu": "1024",
+  "memory": "2048",
+  "primaryContainer": {
+    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:b561f6c89143a50c0585c3e17014c446cd64d2bf79c90d1c38e63e609b192788",
+    "containerPort": 8080,
+    "environment": [
+      { "name": "AWS_REGION", "value": "us-east-2" },
+      { "name": "TRUST_PROXY_HEADERS", "value": "1" },
+      { "name": "SOLUTIONS_HUB_SHEET_ID", "value": "1sR1CTeznF4-8Az3WhGwgaAI4eMD6JEfAUhzgVpEvRSs" },
+      { "name": "SOLUTIONS_HUB_SHEET_GID", "value": "439459761" },
+      { "name": "SOLUTIONS_HUB_DATA_RANGE", "value": "AI2:AK" },
+      { "name": "SOLUTIONS_HUB_COLUMN_FIELDS", "value": "status,department,problem" },
+      { "name": "SOLUTIONS_HUB_SHEETS_READONLY", "value": "1" },
+      { "name": "SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC", "value": "12" },
+      { "name": "SOLUTIONS_HUB_SHEETS_CACHE_SEC", "value": "300" },
+      { "name": "SOLUTIONS_HUB_SHEETS_RETRIES", "value": "1" }
+    ],
+    "secrets": [
+      {
+        "name": "AWS_GCP_SERVICE_ACCOUNT_SECRET_ID",
+        "valueFrom": "arn:aws:secretsmanager:us-east-2:422799216424:secret:GCP_Service_Account_Vertex_AI-eeifEw"
+      }
+    ],
+    "awsLogsConfiguration": {
+      "logGroup": "/ecs/Solution-Hub",
+      "logStreamPrefix": "ecs"
+    }
+  },
+  "scalingTarget": {
+    "minTaskCount": 1,
+    "maxTaskCount": 3
+  }
 }
