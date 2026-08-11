@@ -5,7 +5,7 @@
   "cpu": "1024",
   "memory": "2048",
   "primaryContainer": {
-    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub:latest",
+    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:803eae19b2b40d70d0b90b5e19f1f839a36b5624c55aab1ad2eda70817bee244",
     "containerPort": 8080,
     "environment": [
       { "name": "AWS_REGION", "value": "us-east-2" },

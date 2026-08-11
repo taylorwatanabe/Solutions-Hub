@@ -83,9 +83,27 @@ def _column_fields() -> List[str]:
     return fields or ["status", "department", "problem"]
 
 
+def _sheets_readonly() -> bool:
+    return _strip(os.getenv("SOLUTIONS_HUB_SHEETS_READONLY")) in (
+        "1",
+        "true",
+        "True",
+        "yes",
+        "YES",
+    )
+
+
 def _compact_mode() -> bool:
     """True when reading a fixed column slice (e.g. AI2:AK) instead of full sheet."""
     return bool(_data_range())
+
+
+def _require_sheets_write() -> None:
+    if _sheets_readonly():
+        raise PermissionError(
+            "Google Sheet is connected as Viewer (read-only). "
+            "Kanban reads work; grant the service account Editor to save status changes or new pitches."
+        )
 
 
 def _allow_local() -> bool:
@@ -594,6 +612,8 @@ def get_board(department: Optional[str] = None) -> Dict[str, Any]:
 
 
 def create_submission(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not _use_local_store():
+        _require_sheets_write()
     if _compact_mode() and not _use_local_store():
         # Form-response sheet: only mapped columns exist; require problem at minimum.
         if not _strip(str(payload.get("problem") or "")):
@@ -703,10 +723,12 @@ def update_submission(submission_id: str, patch: Dict[str, Any]) -> Dict[str, An
         rows[idx] = current
         if _use_local_store():
             _write_all_local(rows)
-        elif _compact_mode():
-            _update_compact_row(current)
         else:
-            _write_all_sheets(rows)
+            _require_sheets_write()
+            if _compact_mode():
+                _update_compact_row(current)
+            else:
+                _write_all_sheets(rows)
         return current
 
 
@@ -734,16 +756,18 @@ def upvote_submission(submission_id: str) -> Dict[str, Any]:
 
         if _use_local_store():
             _write_all_local(rows)
-        elif _compact_mode():
-            if "upvotes" in _column_fields():
-                _update_compact_row(current)
-            else:
+        else:
+            if _sheets_readonly() or (
+                _compact_mode() and "upvotes" not in _column_fields()
+            ):
                 logger.info(
-                    "Upvote for %s not persisted — upvotes is not in SOLUTIONS_HUB_COLUMN_FIELDS",
+                    "Upvote for %s not persisted (read-only sheet or upvotes not mapped)",
                     sid,
                 )
-        else:
-            _write_all_sheets(rows)
+            elif _compact_mode():
+                _update_compact_row(current)
+            else:
+                _write_all_sheets(rows)
         return current
 
 

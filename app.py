@@ -78,6 +78,25 @@ def api_list_submissions():
         return jsonify({"error": str(e)}), 500
 
 
+@app.patch("/api/submissions/<submission_id>")
+def api_patch_submission(submission_id: str):
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "JSON object required"}), 400
+    try:
+        sub = sheets_store.update_submission(submission_id, payload)
+        return jsonify({"submission": sub})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("PATCH /api/submissions/%s failed", submission_id)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.post("/api/submissions")
 def api_create_submission():
     payload = request.get_json(silent=True) or {}
@@ -90,27 +109,12 @@ def api_create_submission():
             submission=sub,
         )
         return jsonify({"submission": sub, "sla": sla}), 201
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.exception("POST /api/submissions failed")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.patch("/api/submissions/<submission_id>")
-def api_patch_submission(submission_id: str):
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        return jsonify({"error": "JSON object required"}), 400
-    try:
-        sub = sheets_store.update_submission(submission_id, payload)
-        return jsonify({"submission": sub})
-    except KeyError as e:
-        return jsonify({"error": str(e)}), 404
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.exception("PATCH /api/submissions/%s failed", submission_id)
         return jsonify({"error": str(e)}), 500
 
 
@@ -129,6 +133,31 @@ def api_upvote(submission_id: str):
 @app.get("/")
 def index():
     return send_from_directory(PUBLIC, "index.html")
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    return send_from_directory(PUBLIC, "favicon.ico")
+
+
+@app.get("/favicon.png")
+def favicon_png():
+    return send_from_directory(PUBLIC, "favicon.png")
+
+
+@app.get("/favicon-32.png")
+def favicon_32():
+    return send_from_directory(PUBLIC, "favicon-32.png")
+
+
+@app.get("/apple-touch-icon.png")
+def apple_touch_icon():
+    return send_from_directory(PUBLIC, "apple-touch-icon.png")
+
+
+@app.get("/img/<path:filename>")
+def img(filename: str):
+    return send_from_directory(PUBLIC / "img", filename)
 
 
 @app.get("/css/<path:filename>")

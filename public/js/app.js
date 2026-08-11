@@ -194,8 +194,8 @@ els.tabs.forEach((tab) => {
   tab.addEventListener("click", () => setView(tab.dataset.view));
 });
 
-els.refresh.addEventListener("click", () => loadBoard());
-els.deptFilter.addEventListener("change", () => loadBoard());
+if (els.refresh) els.refresh.addEventListener("click", () => loadBoard());
+if (els.deptFilter) els.deptFilter.addEventListener("change", () => loadBoard());
 
 els.kanban.addEventListener("click", (event) => {
   const card = event.target.closest(".card");
@@ -244,32 +244,34 @@ els.dialogUpvote.addEventListener("click", async () => {
   }
 });
 
-els.intakeForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  els.intakeStatus.textContent = "";
-  els.intakeStatus.className = "form-status";
-  const fd = new FormData(els.intakeForm);
-  const payload = Object.fromEntries(fd.entries());
-  els.intakeSubmit.disabled = true;
-  try {
-    const result = await api("/api/submissions", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    els.intakeForm.reset();
-    els.intakeStatus.classList.add("ok");
-    els.intakeStatus.textContent = `Submitted (${result.submission.id}). 30-day SLA receipt ${
-      result.sla?.sent ? "sent" : "queued (stub for Current)"
-    }.`;
-    setView("board");
-    await loadBoard();
-  } catch (err) {
-    els.intakeStatus.classList.add("err");
-    els.intakeStatus.textContent = err.message || String(err);
-  } finally {
-    els.intakeSubmit.disabled = false;
-  }
-});
+if (els.intakeForm) {
+  els.intakeForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    els.intakeStatus.textContent = "";
+    els.intakeStatus.className = "form-status";
+    const fd = new FormData(els.intakeForm);
+    const payload = Object.fromEntries(fd.entries());
+    els.intakeSubmit.disabled = true;
+    try {
+      const result = await api("/api/submissions", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      els.intakeForm.reset();
+      els.intakeStatus.classList.add("ok");
+      els.intakeStatus.textContent = `Submitted (${result.submission.id}). 30-day SLA receipt ${
+        result.sla?.sent ? "sent" : "queued (stub for Current)"
+      }.`;
+      setView("board");
+      await loadBoard();
+    } catch (err) {
+      els.intakeStatus.classList.add("err");
+      els.intakeStatus.textContent = err.message || String(err);
+    } finally {
+      els.intakeSubmit.disabled = false;
+    }
+  });
+}
 
 fillStatusSelect(els.dialogStatus, "Received");
 loadBoard();
