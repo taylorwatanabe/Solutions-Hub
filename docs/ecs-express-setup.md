@@ -60,11 +60,26 @@ If you instead pass a secret **name/ARN** (not inlined JSON), grant the task rol
 
 ## 3. Google Sheet schema
 
-Header row (tab `Submissions`):
+### Compact mode (Friction-to-Solutions replies) — current default
+
+| Setting | Value |
+|---------|--------|
+| Sheet | `1sR1CTeznF4-8Az3WhGwgaAI4eMD6JEfAUhzgVpEvRSs` |
+| Tab | gid `439459761` |
+| Range | `AI2:AK` (row 2 downward) |
+| Field map | `SOLUTIONS_HUB_COLUMN_FIELDS=status,department,problem` → AI, AJ, AK |
+
+Share the sheet with the GCP SA `client_email` (Editor). Then set ECS env vars (see `scripts/express-update-sheet-input.json`) and inject `AWS_GCP_SERVICE_ACCOUNT_SECRET_ID` as a **Secret**.
+
+If AI/AJ/AK are not status/department/problem, change `SOLUTIONS_HUB_COLUMN_FIELDS` to the correct order (comma-separated field names).
+
+### Full-sheet mode (optional)
+
+Clear `SOLUTIONS_HUB_DATA_RANGE` and use a dedicated tab with header row:
 
 `id`, `submitted_at`, `submitter_name`, `submitter_email`, `department`, `problem`, `option_a`, `option_b`, `option_c`, `recommendation`, `resources`, `estimated_value`, `status`, `upvotes`, `score_total`, `sprint_lead`, `coaching_notes`, `roi_tier`
 
-Status values must be exactly:
+Status values must be exactly (aliases like `Pilot` / `Archived` are normalized):
 
 - Received
 - In Review
@@ -72,7 +87,7 @@ Status values must be exactly:
 - Implemented / Wins
 - NA / Archived
 
-Seed from CSV:
+Seed from CSV (full-sheet mode only):
 
 ```powershell
 python scripts/seed_from_csv.py path\to\verified.csv
