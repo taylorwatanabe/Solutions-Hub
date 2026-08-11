@@ -40,15 +40,36 @@ function truncate(text, n = 140) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.error || `Request failed (${res.status})`);
+  const { retry = true, headers: extraHeaders, ...fetchOptions } = options;
+  const maxAttempts = retry === false ? 1 : 3;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(path, {
+        headers: { "Content-Type": "application/json", ...(extraHeaders || {}) },
+        ...fetchOptions,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data.error || `Request failed (${res.status})`;
+        if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 700 * attempt));
+          continue;
+        }
+        throw new Error(msg);
+      }
+      return data;
+    } catch (err) {
+      lastErr = err;
+      const isHttpErr = err instanceof Error && /Request failed \(\d+\)/.test(err.message);
+      if (!isHttpErr && attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 700 * attempt));
+        continue;
+      }
+      throw err;
+    }
   }
-  return data;
+  throw lastErr || new Error("Request failed");
 }
 
 function setView(name) {
@@ -108,26 +129,31 @@ function renderDeptControls(departmentCounts) {
 function renderBoard(board) {
   lastBoard = board;
   const columns = board.columns || {};
-  els.kanban.innerHTML = (board.statuses || STATUSES)
-    .map((status) => {
-      const cards = columns[status] || [];
+  const monthKeys =
+    board.months && board.months.length
+      ? board.months
+      : Object.keys(columns);
+  els.kanban.innerHTML = monthKeys
+    .map((month) => {
+      const cards = columns[month] || [];
       const cardsHtml = cards
         .map((card) => {
+          const statusLabel = card.status || "Received";
           return `
             <button type="button" class="card" data-id="${escapeAttr(card.id)}" role="listitem">
               <p class="card-dept">${escapeHtml(card.department || "Unspecified")}</p>
               <p class="card-problem">${escapeHtml(truncate(card.problem, 160))}</p>
               <div class="card-meta">
-                <span>${escapeHtml(card.submitter_name || card.submitter_email || "Anonymous")}</span>
+                <span>Status: ${escapeHtml(statusLabel)}</span>
                 <span>▲ ${escapeHtml(String(card.upvotes ?? 0))}</span>
               </div>
             </button>`;
         })
         .join("");
       return `
-        <section class="column" aria-label="${escapeAttr(status)}">
+        <section class="column" aria-label="${escapeAttr(month)}">
           <div class="column-header">
-            <h2>${escapeHtml(status)}</h2>
+            <h2>${escapeHtml(month)}</h2>
             <span class="count">${cards.length}</span>
           </div>
           <div class="column-body">${cardsHtml || `<p class="card-meta">No cards</p>`}</div>
@@ -153,8 +179,8 @@ async function loadBoard() {
 
 function findCard(id) {
   if (!lastBoard?.columns) return null;
-  for (const status of STATUSES) {
-    const hit = (lastBoard.columns[status] || []).find((c) => c.id === id);
+  for (const cards of Object.values(lastBoard.columns)) {
+    const hit = (cards || []).find((c) => c.id === id);
     if (hit) return hit;
   }
   return null;

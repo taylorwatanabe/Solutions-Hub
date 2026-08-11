@@ -1,34 +1,55 @@
-{
-  "serviceArn": "arn:aws:ecs:us-east-2:422799216424:service/Solution-Hub/Solution-Hub",
-  "executionRoleArn": "arn:aws:iam::422799216424:role/ecsTaskExecutionRole",
-  "healthCheckPath": "/healthz",
-  "cpu": "1024",
-  "memory": "2048",
-  "primaryContainer": {
-    "image": "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:803eae19b2b40d70d0b90b5e19f1f839a36b5624c55aab1ad2eda70817bee244",
-    "containerPort": 8080,
-    "environment": [
-      { "name": "AWS_REGION", "value": "us-east-2" },
-      { "name": "TRUST_PROXY_HEADERS", "value": "1" },
-      { "name": "SOLUTIONS_HUB_SHEET_ID", "value": "1sR1CTeznF4-8Az3WhGwgaAI4eMD6JEfAUhzgVpEvRSs" },
-      { "name": "SOLUTIONS_HUB_SHEET_GID", "value": "439459761" },
-      { "name": "SOLUTIONS_HUB_DATA_RANGE", "value": "AI2:AK" },
-      { "name": "SOLUTIONS_HUB_COLUMN_FIELDS", "value": "status,department,problem" },
-      { "name": "SOLUTIONS_HUB_SHEETS_READONLY", "value": "1" }
-    ],
-    "secrets": [
-      {
-        "name": "AWS_GCP_SERVICE_ACCOUNT_SECRET_ID",
-        "valueFrom": "arn:aws:secretsmanager:us-east-2:422799216424:secret:GCP_Service_Account_Vertex_AI-eeifEw"
-      }
-    ],
-    "awsLogsConfiguration": {
-      "logGroup": "/ecs/Solution-Hub",
-      "logStreamPrefix": "ecs"
-    }
-  },
-  "scalingTarget": {
-    "minTaskCount": 1,
-    "maxTaskCount": 3
-  }
+﻿{
+    "serviceArn":  "arn:aws:ecs:us-east-2:422799216424:service/Solution-Hub/Solution-Hub",
+    "executionRoleArn":  "arn:aws:iam::422799216424:role/ecsTaskExecutionRole",
+    "healthCheckPath":  "/healthz",
+    "cpu":  "1024",
+    "memory":  "2048",
+    "primaryContainer":  {
+                             "image":  "422799216424.dkr.ecr.us-east-2.amazonaws.com/solution-hub@sha256:061f29e33c909df2e4993e8c2b1f15403202e4570caa3d1a67ef5a4d23e592d7",
+                             "containerPort":  8080,
+                             "environment":  [
+                                                 {
+                                                     "name":  "AWS_REGION",
+                                                     "value":  "us-east-2"
+                                                 },
+                                                 {
+                                                     "name":  "TRUST_PROXY_HEADERS",
+                                                     "value":  "1"
+                                                 },
+                                                 {
+                                                     "name":  "SOLUTIONS_HUB_SHEET_ID",
+                                                     "value":  "1sR1CTeznF4-8Az3WhGwgaAI4eMD6JEfAUhzgVpEvRSs"
+                                                 },
+                                                 {
+                                                     "name":  "SOLUTIONS_HUB_SHEET_GID",
+                                                     "value":  "439459761"
+                                                 },
+                                                 {
+                                                     "name":  "SOLUTIONS_HUB_DATA_RANGE",
+                                                     "value":  "AI2:AK"
+                                                 },
+                                                 {
+                                                     "name":  "SOLUTIONS_HUB_COLUMN_FIELDS",
+                                                     "value":  "status,department,problem"
+                                                 },
+                                                 {
+                                                     "name":  "SOLUTIONS_HUB_SHEETS_READONLY",
+                                                     "value":  "1"
+                                                 }
+                                             ],
+                             "secrets":  [
+                                             {
+                                                 "name":  "AWS_GCP_SERVICE_ACCOUNT_SECRET_ID",
+                                                 "valueFrom":  "arn:aws:secretsmanager:us-east-2:422799216424:secret:GCP_Service_Account_Vertex_AI-eeifEw"
+                                             }
+                                         ],
+                             "awsLogsConfiguration":  {
+                                                          "logGroup":  "/ecs/Solution-Hub",
+                                                          "logStreamPrefix":  "ecs"
+                                                      }
+                         },
+    "scalingTarget":  {
+                          "minTaskCount":  1,
+                          "maxTaskCount":  3
+                      }
 }

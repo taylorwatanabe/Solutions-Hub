@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import re
+import socket
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,76 @@ SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 _lock = threading.Lock()
 _tab_cache: Dict[str, str] = {}
+_sheets_svc = None
+_sheets_svc_lock = threading.Lock()
+_rows_cache: Dict[str, Any] = {"ts": 0.0, "key": "", "rows": None}
+
+
+def _sheets_http_timeout() -> int:
+    try:
+        return max(10, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_TIMEOUT_SEC")) or "25"))
+    except ValueError:
+        return 25
+
+
+def _sheets_cache_ttl() -> float:
+    try:
+        return max(0.0, float(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_CACHE_SEC")) or "60"))
+    except ValueError:
+        return 60.0
+
+
+def _sheets_retries() -> int:
+    try:
+        return max(1, int(_strip(os.getenv("SOLUTIONS_HUB_SHEETS_RETRIES")) or "2"))
+    except ValueError:
+        return 2
+
+
+def _invalidate_rows_cache() -> None:
+    with _lock:
+        _rows_cache["ts"] = 0.0
+        _rows_cache["key"] = ""
+        _rows_cache["rows"] = None
+
+
+def _call_sheets(label: str, fn):
+    """Execute a Sheets API call with timeout-aware retries."""
+    attempts = _sheets_retries()
+    last: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except (TimeoutError, socket.timeout, OSError, ConnectionError) as e:
+            last = e
+            logger.warning(
+                "Sheets %s timed out/failed (attempt %d/%d): %s",
+                label,
+                attempt,
+                attempts,
+                e,
+            )
+            if attempt < attempts:
+                time.sleep(min(8.0, 0.6 * (2 ** (attempt - 1))))
+        except Exception as e:
+            # googleapiclient wraps some transport errors
+            name = type(e).__name__
+            msg = str(e).lower()
+            if "timed out" in msg or "timeout" in msg or name in ("TimeoutError", "SSLError"):
+                last = e
+                logger.warning(
+                    "Sheets %s timed out/failed (attempt %d/%d): %s",
+                    label,
+                    attempt,
+                    attempts,
+                    e,
+                )
+                if attempt < attempts:
+                    time.sleep(min(8.0, 0.6 * (2 ** (attempt - 1))))
+                    continue
+            raise
+    assert last is not None
+    raise last
 
 
 def _strip(value: Optional[str]) -> str:
@@ -214,14 +286,39 @@ def _service_account_info() -> Dict[str, Any]:
 
 
 def _sheets_service():
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
+    """Reuse one Sheets client; set an explicit HTTP timeout to avoid gateway 504s."""
+    global _sheets_svc
+    with _sheets_svc_lock:
+        if _sheets_svc is not None:
+            return _sheets_svc
 
-    info = _service_account_info()
-    creds = service_account.Credentials.from_service_account_info(
-        info, scopes=[SHEETS_SCOPE]
-    )
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        info = _service_account_info()
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=[SHEETS_SCOPE]
+        )
+        timeout = _sheets_http_timeout()
+        try:
+            import google_auth_httplib2
+            import httplib2
+
+            http = httplib2.Http(timeout=timeout)
+            authed = google_auth_httplib2.AuthorizedHttp(creds, http=http)
+            _sheets_svc = build(
+                "sheets", "v4", http=authed, cache_discovery=False
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not build timeout-aware Sheets HTTP client (%s); using default",
+                e,
+            )
+            _sheets_svc = build(
+                "sheets", "v4", credentials=creds, cache_discovery=False
+            )
+        logger.info("Initialized Sheets client (timeout=%ss)", timeout)
+        return _sheets_svc
 
 
 def _escape_tab(tab: str) -> str:
@@ -238,7 +335,10 @@ def _resolve_tab_title(svc, spreadsheet_id: str) -> str:
     if cache_key in _tab_cache:
         return _tab_cache[cache_key]
 
-    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    meta = _call_sheets(
+        "spreadsheets.get",
+        lambda: svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute(),
+    )
     sheets = meta.get("sheets") or []
     if gid:
         for sh in sheets:
@@ -340,11 +440,12 @@ def _read_compact_sheets() -> List[Dict[str, Any]]:
     if end_row:
         a1 = f"'{_escape_tab(tab)}'!{start_col}{start_row}:{end_col}{end_row}"
 
-    result = (
-        svc.spreadsheets()
+    result = _call_sheets(
+        "values.get.compact",
+        lambda: svc.spreadsheets()
         .values()
         .get(spreadsheetId=sheet_id, range=a1)
-        .execute()
+        .execute(),
     )
     values = result.get("values") or []
     out: List[Dict[str, Any]] = []
@@ -387,11 +488,12 @@ def _read_full_sheets() -> List[Dict[str, Any]]:
     sheet_id = _sheet_id()
     svc = _sheets_service()
     tab = _resolve_tab_title(svc, sheet_id)
-    result = (
-        svc.spreadsheets()
+    result = _call_sheets(
+        "values.get.full",
+        lambda: svc.spreadsheets()
         .values()
         .get(spreadsheetId=sheet_id, range=_a1_full_tab(tab))
-        .execute()
+        .execute(),
     )
     values = result.get("values") or []
     if not values:
@@ -411,9 +513,38 @@ def _read_full_sheets() -> List[Dict[str, Any]]:
 
 
 def _read_all_sheets() -> List[Dict[str, Any]]:
-    if _compact_mode():
-        return _read_compact_sheets()
-    return _read_full_sheets()
+    cache_key = "|".join(
+        [
+            _sheet_id(),
+            _sheet_gid(),
+            _sheet_tab_env(),
+            _data_range(),
+            ",".join(_column_fields()),
+            "compact" if _compact_mode() else "full",
+        ]
+    )
+    ttl = _sheets_cache_ttl()
+    now = time.time()
+    stale: Optional[List[Dict[str, Any]]] = None
+    with _lock:
+        if _rows_cache["rows"] is not None and _rows_cache["key"] == cache_key:
+            stale = [dict(r) for r in _rows_cache["rows"]]
+            if ttl > 0 and now - float(_rows_cache["ts"]) < ttl:
+                return stale
+
+    try:
+        rows = _read_compact_sheets() if _compact_mode() else _read_full_sheets()
+    except Exception:
+        if stale is not None:
+            logger.warning("Sheets read failed; serving stale cache (%d rows)", len(stale))
+            return stale
+        raise
+
+    with _lock:
+        _rows_cache["ts"] = time.time()
+        _rows_cache["key"] = cache_key
+        _rows_cache["rows"] = [dict(r) for r in rows]
+    return rows
 
 
 def _update_compact_row(sub: Dict[str, Any]) -> None:
@@ -439,12 +570,19 @@ def _update_compact_row(sub: Dict[str, Any]) -> None:
             values.append(str(sub.get(field) or ""))
 
     a1 = f"'{_escape_tab(tab)}'!{start_col}{sheet_row}:{end_col}{sheet_row}"
-    svc.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=a1,
-        valueInputOption="RAW",
-        body={"values": [values]},
-    ).execute()
+    _call_sheets(
+        "values.update.compact",
+        lambda: svc.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=sheet_id,
+            range=a1,
+            valueInputOption="RAW",
+            body={"values": [values]},
+        )
+        .execute(),
+    )
+    _invalidate_rows_cache()
 
 
 def _append_compact_row(sub: Dict[str, Any]) -> Dict[str, Any]:
@@ -457,11 +595,13 @@ def _append_compact_row(sub: Dict[str, Any]) -> Dict[str, Any]:
     # Find next empty row in the range columns
     a1 = f"'{_escape_tab(tab)}'!{start_col}{start_row}:{end_col}"
     existing = (
-        svc.spreadsheets()
-        .values()
-        .get(spreadsheetId=sheet_id, range=a1)
-        .execute()
-        .get("values")
+        _call_sheets(
+            "values.get.compact.append",
+            lambda: svc.spreadsheets()
+            .values()
+            .get(spreadsheetId=sheet_id, range=a1)
+            .execute(),
+        ).get("values")
         or []
     )
     next_row = start_row + len(existing)
@@ -476,12 +616,19 @@ def _append_compact_row(sub: Dict[str, Any]) -> Dict[str, Any]:
             values.append(str(sub.get(field) or ""))
 
     write_a1 = f"'{_escape_tab(tab)}'!{start_col}{next_row}:{end_col}{next_row}"
-    svc.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=write_a1,
-        valueInputOption="RAW",
-        body={"values": [values]},
-    ).execute()
+    _call_sheets(
+        "values.update.compact.append",
+        lambda: svc.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=sheet_id,
+            range=write_a1,
+            valueInputOption="RAW",
+            body={"values": [values]},
+        )
+        .execute(),
+    )
+    _invalidate_rows_cache()
     sub["id"] = f"row-{next_row}"
     sub["_sheet_row"] = next_row
     return sub
@@ -497,15 +644,26 @@ def _write_all_sheets(subs: List[Dict[str, Any]]) -> None:
     svc = _sheets_service()
     tab = _resolve_tab_title(svc, sheet_id)
     body = {"values": [HEADERS] + [_submission_to_row(s) for s in subs]}
-    svc.spreadsheets().values().clear(
-        spreadsheetId=sheet_id, range=_a1_full_tab(tab)
-    ).execute()
-    svc.spreadsheets().values().update(
-        spreadsheetId=sheet_id,
-        range=f"'{_escape_tab(tab)}'!A1",
-        valueInputOption="RAW",
-        body=body,
-    ).execute()
+    _call_sheets(
+        "values.clear.full",
+        lambda: svc.spreadsheets()
+        .values()
+        .clear(spreadsheetId=sheet_id, range=_a1_full_tab(tab))
+        .execute(),
+    )
+    _call_sheets(
+        "values.update.full",
+        lambda: svc.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=sheet_id,
+            range=f"'{_escape_tab(tab)}'!A1",
+            valueInputOption="RAW",
+            body=body,
+        )
+        .execute(),
+    )
+    _invalidate_rows_cache()
 
 
 def _append_sheet_row(sub: Dict[str, Any]) -> Dict[str, Any]:
@@ -515,27 +673,42 @@ def _append_sheet_row(sub: Dict[str, Any]) -> Dict[str, Any]:
     svc = _sheets_service()
     tab = _resolve_tab_title(svc, sheet_id)
     existing = (
-        svc.spreadsheets()
-        .values()
-        .get(spreadsheetId=sheet_id, range=_a1_full_tab(tab, "A"))
-        .execute()
-        .get("values")
+        _call_sheets(
+            "values.get.full.append",
+            lambda: svc.spreadsheets()
+            .values()
+            .get(spreadsheetId=sheet_id, range=_a1_full_tab(tab, "A"))
+            .execute(),
+        ).get("values")
         or []
     )
     if not existing:
-        svc.spreadsheets().values().update(
+        _call_sheets(
+            "values.update.headers",
+            lambda: svc.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=sheet_id,
+                range=f"'{_escape_tab(tab)}'!A1",
+                valueInputOption="RAW",
+                body={"values": [HEADERS]},
+            )
+            .execute(),
+        )
+    _call_sheets(
+        "values.append.full",
+        lambda: svc.spreadsheets()
+        .values()
+        .append(
             spreadsheetId=sheet_id,
-            range=f"'{_escape_tab(tab)}'!A1",
+            range=_a1_full_tab(tab),
             valueInputOption="RAW",
-            body={"values": [HEADERS]},
-        ).execute()
-    svc.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range=_a1_full_tab(tab),
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": [_submission_to_row(sub)]},
-    ).execute()
+            insertDataOption="INSERT_ROWS",
+            body={"values": [_submission_to_row(sub)]},
+        )
+        .execute(),
+    )
+    _invalidate_rows_cache()
     return sub
 
 
@@ -578,17 +751,95 @@ def list_submissions(department: Optional[str] = None) -> List[Dict[str, Any]]:
     return rows
 
 
+_DATE_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%Y",
+)
+
+
+def _parse_flexible_datetime(raw: Any) -> Optional[datetime]:
+    text = _strip(str(raw or ""))
+    if not text:
+        return None
+    # Normalize Zulu / remove commas
+    candidate = text.replace("Z", "+00:00").replace(",", "")
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        pass
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(candidate, fmt)
+        except ValueError:
+            continue
+    # Trailing timezone without colon, e.g. +0000
+    m = re.match(
+        r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)([+-]\d{4})$",
+        candidate,
+    )
+    if m:
+        try:
+            return datetime.strptime(m.group(1) + m.group(2), "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            try:
+                return datetime.strptime(m.group(1) + m.group(2), "%Y-%m-%d %H:%M:%S%z")
+            except ValueError:
+                pass
+    return None
+
+
+def _parse_submission_datetime(row: Dict[str, Any]) -> Optional[datetime]:
+    """Prefer submitted_at; fall back to problem when the sheet stores a timestamp there."""
+    dt = _parse_flexible_datetime(row.get("submitted_at"))
+    if dt:
+        return dt
+    return _parse_flexible_datetime(row.get("problem"))
+
+
+def _month_bucket(dt: Optional[datetime]) -> Tuple[str, Tuple[int, int]]:
+    if not dt:
+        return "Unknown date", (0, 0)
+    label = dt.strftime("%B %Y")  # e.g. May 2026
+    return label, (dt.year, dt.month)
+
+
 def get_board(department: Optional[str] = None) -> Dict[str, Any]:
     rows = list_submissions(department=department)
-    columns: Dict[str, List[Dict[str, Any]]] = {s: [] for s in STATUSES}
-    unknown: List[Dict[str, Any]] = []
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    month_sort: Dict[str, Tuple[int, int]] = {}
+
     for row in rows:
         status = _normalize_status(str(row.get("status") or "Received"))
-        row = {**row, "status": status}
-        if status not in columns:
-            unknown.append(row)
-            continue
-        columns[status].append(row)
+        dt = _parse_submission_datetime(row)
+        label, sort_key = _month_bucket(dt)
+        enriched = {
+            **row,
+            "status": status,
+            "board_month": label,
+        }
+        if dt and not _strip(str(row.get("submitted_at") or "")):
+            # Compact sheet often stores timestamp in the mapped "problem" column.
+            enriched["submitted_at"] = dt.isoformat(sep=" ", timespec="minutes")
+        buckets.setdefault(label, []).append(enriched)
+        month_sort[label] = sort_key
+
+    # Newest month first; "Unknown date" last.
+    def _col_sort(label: str) -> Tuple[int, int, int]:
+        y, m = month_sort.get(label, (0, 0))
+        if label == "Unknown date":
+            return (1, 0, 0)
+        return (0, -y, -m)
+
+    months = sorted(buckets.keys(), key=_col_sort)
+    columns = {m: buckets[m] for m in months}
 
     by_dept: Dict[str, int] = {}
     for row in rows:
@@ -596,11 +847,13 @@ def get_board(department: Optional[str] = None) -> Dict[str, Any]:
         by_dept[d] = by_dept.get(d, 0) + 1
 
     return {
+        "group_by": "month",
+        "months": months,
         "statuses": STATUSES,
         "columns": columns,
-        "counts": {s: len(columns[s]) for s in STATUSES},
+        "counts": {m: len(columns[m]) for m in months},
         "department_counts": dict(sorted(by_dept.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "unknown": unknown,
+        "unknown": [],
         "total": len(rows),
         "source": {
             "sheet_id": _sheet_id() if not _use_local_store() else None,

@@ -58,6 +58,7 @@ body {
   object-fit: cover;
   opacity: 0.09;
   user-select: none;
+  mix-blend-mode: multiply;
 }
 
 .app-shell {
@@ -69,21 +70,35 @@ body {
 }
 
 .topbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
   gap: 1rem;
   margin-bottom: 1.25rem;
   padding-bottom: 1rem;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
 }
 
+/* Same wordmark treatment as CAT-2 / QC Dashboard */
+.logo {
+  font-weight: 700;
+  font-size: 1.125rem;
+  letter-spacing: 0.06em;
+  color: #0a2f6b;
+  justify-self: start;
+}
+
+.header-spacer {
+  justify-self: end;
+}
+
 .brand-block {
   display: flex;
   flex-direction: row;
   align-items: center;
+  justify-content: center;
   gap: 0.85rem;
+  grid-column: 2;
 }
 
 .brand-logo {
@@ -92,6 +107,9 @@ body {
   height: auto;
   object-fit: contain;
   flex-shrink: 0;
+  background: transparent;
+  /* Blend any residual light canvas into the page gradient */
+  mix-blend-mode: multiply;
 }
 
 .brand-copy {
@@ -243,7 +261,7 @@ select {
 
 .kanban {
   display: grid;
-  grid-template-columns: repeat(5, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 0.85rem;
   overflow-x: auto;
   padding-bottom: 0.5rem;
@@ -504,13 +522,28 @@ dialog::backdrop {
 
 @media (max-width: 1100px) {
   .kanban {
-    grid-template-columns: repeat(5, minmax(240px, 80vw));
+    grid-template-columns: repeat(auto-fit, minmax(240px, 80vw));
   }
 }
 
 @media (max-width: 720px) {
   .app-shell {
     padding: 1rem;
+  }
+
+  .topbar {
+    grid-template-columns: 1fr;
+    justify-items: start;
+    gap: 0.75rem;
+  }
+
+  .brand-block {
+    grid-column: 1;
+    justify-content: flex-start;
+  }
+
+  .header-spacer {
+    display: none;
   }
 
   .grid-2 {

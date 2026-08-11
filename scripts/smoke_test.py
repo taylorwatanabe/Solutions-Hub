@@ -47,7 +47,10 @@ def main() -> int:
     assert r.status_code == 200, r.data
     board = r.get_json()
     assert board.get("total", 0) >= 1
-    assert "Received" in (board.get("columns") or {})
+    assert board.get("group_by") == "month"
+    assert isinstance(board.get("months"), list) and len(board["months"]) >= 1
+    # Demo data is from August 2026
+    assert "August 2026" in (board.get("columns") or {})
 
     payload = {
         "problem": "CI smoke problem",
