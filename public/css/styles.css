@@ -268,6 +268,109 @@ select {
   font-size: 0.95rem;
 }
 
+.board-months {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.month-row {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 0.85rem;
+  align-items: start;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: var(--radius);
+  padding: 0.85rem 0.9rem 1rem;
+  box-shadow: var(--shadow);
+}
+
+.month-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding-top: 0.2rem;
+}
+
+.month-row-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.month-row-title h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.15rem;
+  color: var(--brand-deep);
+}
+
+.dept-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.32rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, #e8d4c4);
+  background: #fff4ea;
+  color: #b45309;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.dept-tile:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(28, 45, 74, 0.12);
+}
+
+.dept-tile-count {
+  font-weight: 700;
+}
+
+.dept-tile--de {
+  background: #fff1e4;
+  border-color: #e8a46a;
+  color: #c2410c;
+}
+
+.dept-tile--pe {
+  background: #243447;
+  border-color: #1a2836;
+  color: #fff;
+}
+
+.dept-tile--default {
+  background: #fff;
+  border-color: color-mix(in srgb, var(--line) 80%, transparent);
+  color: var(--ink);
+}
+
+.completed-toggle {
+  white-space: nowrap;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.55rem;
+}
+
+.completed-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--brand) 12%, white);
+  border-color: var(--brand);
+  color: var(--brand-deep);
+}
+
+.month-kanban {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.65rem;
+  align-items: stretch;
+  min-width: 0;
+}
+
 .kanban {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -280,10 +383,10 @@ select {
   background: color-mix(in srgb, var(--surface) 88%, white);
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   border-radius: var(--radius);
-  min-height: 420px;
+  min-height: 110px;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow);
+  box-shadow: none;
 }
 
 .column-header {
@@ -318,7 +421,16 @@ select {
   gap: 0.55rem;
   flex: 1;
   overflow-y: auto;
-  max-height: calc(100vh - 220px);
+  max-height: 360px;
+}
+
+.column-body--tiles {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0.4rem;
+  max-height: 140px;
+  min-height: 4.5rem;
 }
 
 .card {
@@ -445,6 +557,68 @@ legend {
   color: var(--danger);
 }
 
+body.drilldown-open {
+  overflow: hidden;
+}
+
+.drilldown {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(15, 30, 38, 0.55);
+  display: flex;
+  padding: 0;
+}
+
+.drilldown[hidden] {
+  display: none !important;
+}
+
+.drilldown-panel {
+  width: 100vw;
+  height: 100vh;
+  background: #f4f7fa;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.drilldown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+
+.drilldown-header h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.25rem;
+  color: var(--brand-deep);
+}
+
+.drilldown-meta {
+  margin: 0.25rem 0 0;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+}
+
+.drilldown-body {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem 1.25rem 1.5rem;
+}
+
+.drilldown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+  align-content: start;
+}
+
 dialog {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -530,6 +704,11 @@ dialog::backdrop {
 }
 
 @media (max-width: 1100px) {
+  .month-kanban {
+    grid-template-columns: repeat(auto-fit, minmax(220px, 80vw));
+    overflow-x: auto;
+  }
+
   .kanban {
     grid-template-columns: repeat(auto-fit, minmax(240px, 80vw));
   }
@@ -555,7 +734,24 @@ dialog::backdrop {
     display: none;
   }
 
+  .month-row {
+    grid-template-columns: 1fr;
+  }
+
+  .month-rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+    width: 100%;
+  }
+
   .grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .drilldown-grid {
     grid-template-columns: 1fr;
   }
 

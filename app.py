@@ -60,13 +60,20 @@ def build_info():
 @app.get("/api/board")
 def api_board():
     department = (request.args.get("department") or "").strip() or None
-    logger.info("GET /api/board start department=%r", department)
+    refresh = (request.args.get("refresh") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    logger.info("GET /api/board start department=%r refresh=%s", department, refresh)
     try:
+        if refresh:
+            sheets_store.refresh_board_cache()
         board = sheets_store.get_board(department=department)
         logger.info(
             "GET /api/board ok total=%s months=%s",
             board.get("total"),
-            board.get("months"),
+            [m.get("label") for m in (board.get("months") or [])],
         )
         return jsonify(board)
     except Exception as e:

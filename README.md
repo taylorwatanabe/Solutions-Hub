@@ -6,7 +6,7 @@ Friction-to-Solutions portal: Kanban pipeline by status + 1-3-1 intake.
 
 ## Features (MVP)
 
-- Status Kanban: Received → In Review → In Progress / Pilots → Implemented / Wins → NA / Archived
+- Status Kanban: Received → In Review → In Progress / Pilots → Completed → NA / Archived
 - Department filters and quantity chips
 - 1-3-1 intake form (problem / three options / recommendation)
 - Card upvote + status/department/notes edits (no auth in MVP)

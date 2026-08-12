@@ -84,7 +84,7 @@ Status values must be exactly (aliases like `Pilot` / `Archived` are normalized)
 - Received
 - In Review
 - In Progress / Pilots
-- Implemented / Wins
+- Completed
 - NA / Archived
 
 Seed from CSV (full-sheet mode only):

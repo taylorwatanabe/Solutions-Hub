@@ -20,7 +20,7 @@ STATUSES = [
     "Received",
     "In Review",
     "In Progress / Pilots",
-    "Implemented / Wins",
+    "Completed",
     "NA / Archived",
 ]
 
@@ -44,6 +44,9 @@ HEADERS = [
     "coaching_notes",
     "roi_tier",
 ]
+
+COMPLETED_STATUSES = ["Completed"]
+ACTIVE_STATUSES = [s for s in STATUSES if s not in COMPLETED_STATUSES]
 
 # Default: Friction-to-Solutions replies sheet, columns AI–AK from row 2.
 DEFAULT_SHEET_ID = "1sR1CTeznF4-8Az3WhGwgaAI4eMD6JEfAUhzgVpEvRSs"
@@ -638,10 +641,11 @@ def _normalize_status(raw: str) -> str:
         "in progress / pilots": "In Progress / Pilots",
         "pilot": "In Progress / Pilots",
         "pilots": "In Progress / Pilots",
-        "implemented": "Implemented / Wins",
-        "implemented / wins": "Implemented / Wins",
-        "wins": "Implemented / Wins",
-        "win": "Implemented / Wins",
+        "completed": "Completed",
+        "implemented": "Completed",
+        "implemented / wins": "Completed",
+        "wins": "Completed",
+        "win": "Completed",
         "na": "NA / Archived",
         "n/a": "NA / Archived",
         "archived": "NA / Archived",
@@ -901,11 +905,35 @@ _DATE_FORMATS = (
 )
 
 
+def _month_bucket(dt: Optional[datetime]) -> Tuple[str, Tuple[int, int]]:
+    if not dt:
+        return "Unknown date", (0, 0)
+    # e.g. May.26
+    label = f"{dt.strftime('%b')}.{dt.strftime('%y')}"
+    return label, (dt.year, dt.month)
+
+
+def _format_display_date(dt: Optional[datetime], fallback: str = "") -> str:
+    if dt:
+        return dt.strftime("%Y-%m-%d")
+    text = _strip(fallback)
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
+    if m:
+        return m.group(1)
+    m = re.match(r"^(\d{1,2}/\d{1,2}/\d{4})", text)
+    if m:
+        return m.group(1)
+    # Compact labels like May.26 / May 26
+    m = re.match(r"^([A-Za-z]{3})[.\s-]+(\d{2}|\d{4})$", text)
+    if m:
+        return text
+    return text
+
+
 def _parse_flexible_datetime(raw: Any) -> Optional[datetime]:
     text = _strip(str(raw or ""))
     if not text:
         return None
-    # Normalize Zulu / remove commas
     candidate = text.replace("Z", "+00:00").replace(",", "")
     try:
         return datetime.fromisoformat(candidate)
@@ -916,7 +944,19 @@ def _parse_flexible_datetime(raw: Any) -> Optional[datetime]:
             return datetime.strptime(candidate, fmt)
         except ValueError:
             continue
-    # Trailing timezone without colon, e.g. +0000
+    # May.26 / May 26 / May-26 → assume 20xx
+    m = re.match(r"^([A-Za-z]{3})[.\s-]+(\d{2})$", candidate)
+    if m:
+        try:
+            return datetime.strptime(f"{m.group(1)} 20{m.group(2)}", "%b %Y")
+        except ValueError:
+            pass
+    m = re.match(r"^([A-Za-z]{3})[.\s-]+(\d{4})$", candidate)
+    if m:
+        try:
+            return datetime.strptime(f"{m.group(1)} {m.group(2)}", "%b %Y")
+        except ValueError:
+            pass
     m = re.match(
         r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)([+-]\d{4})$",
         candidate,
@@ -940,31 +980,52 @@ def _parse_submission_datetime(row: Dict[str, Any]) -> Optional[datetime]:
     return _parse_flexible_datetime(row.get("problem"))
 
 
-def _month_bucket(dt: Optional[datetime]) -> Tuple[str, Tuple[int, int]]:
-    if not dt:
-        return "Unknown date", (0, 0)
-    label = dt.strftime("%B %Y")  # e.g. May 2026
-    return label, (dt.year, dt.month)
-
-
 def get_board(department: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Month rows, each with department tiles + status columns.
+    Completed statuses are included but flagged for the UI to hide by default.
+    """
     rows = list_submissions(department=department)
-    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    month_rows: Dict[str, Dict[str, Any]] = {}
     month_sort: Dict[str, Tuple[int, int]] = {}
 
     for row in rows:
         status = _normalize_status(str(row.get("status") or "Received"))
         dt = _parse_submission_datetime(row)
         label, sort_key = _month_bucket(dt)
+        display_date = _format_display_date(dt, str(row.get("submitted_at") or row.get("problem") or ""))
         enriched = {
             **row,
             "status": status,
             "board_month": label,
+            "display_date": display_date,
+            "is_completed": status in COMPLETED_STATUSES,
         }
         if dt and not _strip(str(row.get("submitted_at") or "")):
-            enriched["submitted_at"] = dt.isoformat(sep=" ", timespec="minutes")
-        buckets.setdefault(label, []).append(enriched)
-        month_sort[label] = sort_key
+            enriched["submitted_at"] = dt.strftime("%Y-%m-%d")
+        elif dt:
+            enriched["submitted_at"] = dt.strftime("%Y-%m-%d")
+
+        bucket = month_rows.get(label)
+        if bucket is None:
+            bucket = {
+                "label": label,
+                "columns": {s: [] for s in STATUSES},
+                "department_counts": {},
+                "completed_count": 0,
+                "total": 0,
+            }
+            month_rows[label] = bucket
+            month_sort[label] = sort_key
+
+        if status not in bucket["columns"]:
+            bucket["columns"][status] = []
+        bucket["columns"][status].append(enriched)
+        bucket["total"] += 1
+        if status in COMPLETED_STATUSES:
+            bucket["completed_count"] += 1
+        dept = _strip(enriched.get("department")) or "Unspecified"
+        bucket["department_counts"][dept] = int(bucket["department_counts"].get(dept) or 0) + 1
 
     def _col_sort(label: str) -> Tuple[int, int, int]:
         y, m = month_sort.get(label, (0, 0))
@@ -972,8 +1033,26 @@ def get_board(department: Optional[str] = None) -> Dict[str, Any]:
             return (1, 0, 0)
         return (0, -y, -m)
 
-    months = sorted(buckets.keys(), key=_col_sort)
-    columns = {m: buckets[m] for m in months}
+    ordered_labels = sorted(month_rows.keys(), key=_col_sort)
+    months_out: List[Dict[str, Any]] = []
+    for label in ordered_labels:
+        bucket = month_rows[label]
+        dept_tiles = [
+            {"name": name, "count": count}
+            for name, count in sorted(
+                bucket["department_counts"].items(), key=lambda kv: (-kv[1], kv[0])
+            )
+        ]
+        months_out.append(
+            {
+                "label": label,
+                "department_tiles": dept_tiles,
+                "columns": bucket["columns"],
+                "counts": {s: len(bucket["columns"].get(s) or []) for s in STATUSES},
+                "completed_count": bucket["completed_count"],
+                "total": bucket["total"],
+            }
+        )
 
     by_dept: Dict[str, int] = {}
     for row in rows:
@@ -981,11 +1060,11 @@ def get_board(department: Optional[str] = None) -> Dict[str, Any]:
         by_dept[d] = by_dept.get(d, 0) + 1
 
     return {
-        "group_by": "month",
-        "months": months,
+        "group_by": "month_rows",
         "statuses": STATUSES,
-        "columns": columns,
-        "counts": {m: len(columns[m]) for m in months},
+        "active_statuses": ACTIVE_STATUSES,
+        "completed_statuses": COMPLETED_STATUSES,
+        "months": months_out,
         "department_counts": dict(sorted(by_dept.items(), key=lambda kv: (-kv[1], kv[0]))),
         "unknown": [],
         "total": len(rows),
@@ -996,6 +1075,11 @@ def get_board(department: Optional[str] = None) -> Dict[str, Any]:
             "mode": "local" if _use_local_store() else ("compact" if _compact_mode() else "full"),
         },
     }
+
+
+def refresh_board_cache() -> None:
+    """Force the next Sheets read to hit Google (used by Refresh)."""
+    _invalidate_rows_cache()
 
 
 def create_submission(payload: Dict[str, Any]) -> Dict[str, Any]:

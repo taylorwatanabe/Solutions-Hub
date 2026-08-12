@@ -47,10 +47,14 @@ def main() -> int:
     assert r.status_code == 200, r.data
     board = r.get_json()
     assert board.get("total", 0) >= 1
-    assert board.get("group_by") == "month"
+    assert board.get("group_by") == "month_rows"
     assert isinstance(board.get("months"), list) and len(board["months"]) >= 1
-    # Demo data is from August 2026
-    assert "August 2026" in (board.get("columns") or {})
+    first_month = board["months"][0]
+    assert "label" in first_month
+    assert "columns" in first_month
+    assert "Received" in (first_month.get("columns") or {})
+    assert "department_tiles" in first_month
+    assert "Completed" in (board.get("completed_statuses") or [])
 
     payload = {
         "problem": "CI smoke problem",
