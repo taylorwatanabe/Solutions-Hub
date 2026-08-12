@@ -268,13 +268,42 @@ function renderMonthRow(month, board) {
     </section>`;
 }
 
+function cardDepartment(card) {
+  return String(card?.department || "").trim() || "Unspecified";
+}
+
+function filterBoardByDepartment(board, dept) {
+  if (!dept) return board;
+  const completedStatuses = board.completed_statuses || ["Completed"];
+  const months = (board.months || [])
+    .map((month) => {
+      const columns = {};
+      for (const [status, cards] of Object.entries(month.columns || {})) {
+        columns[status] = (cards || []).filter((c) => cardDepartment(c) === dept);
+      }
+      const allCards = Object.values(columns).flat();
+      return {
+        ...month,
+        columns,
+        total: allCards.length,
+        completed_count: allCards.filter(
+          (c) => c.is_completed || completedStatuses.includes(c.status)
+        ).length,
+      };
+    })
+    .filter((month) => month.total > 0);
+  return { ...board, months };
+}
+
 function renderBoard(board) {
   lastBoard = board;
-  const months = board.months || [];
+  const dept = els.deptFilter?.value || "";
+  const visible = filterBoardByDepartment(board, dept);
+  const months = visible.months || [];
   els.kanban.className = "board-months";
   els.kanban.innerHTML = months.length
     ? months.map((m) => renderMonthRow(m, board)).join("")
-    : `<p class="board-loading">No submissions found.</p>`;
+    : `<p class="board-loading">No submissions found${dept ? ` for ${dept}` : ""}.</p>`;
   renderDeptControls(board.department_counts || {});
 }
 
@@ -283,9 +312,7 @@ async function loadBoard({ refresh = false } = {}) {
   els.boardError.hidden = true;
   els.kanban.className = "board-months";
   els.kanban.innerHTML = `<p class="board-loading">${refresh ? "Refreshing from Google Sheets…" : "Loading board…"}</p>`;
-  const dept = els.deptFilter.value;
   const params = new URLSearchParams();
-  if (dept) params.set("department", dept);
   if (refresh) params.set("refresh", "1");
   const qs = params.toString() ? `?${params.toString()}` : "";
   try {
@@ -294,6 +321,7 @@ async function loadBoard({ refresh = false } = {}) {
       els.kanban.innerHTML = "";
       els.boardError.hidden = false;
       els.boardError.textContent = "No submissions found for this filter.";
+      renderDeptControls(board.department_counts || {});
       return;
     }
     renderBoard(board);
@@ -326,7 +354,7 @@ function cardsForCriteria({ month, status, department }) {
     cards = cards.filter((c) => !c.is_completed && !completedStatuses.includes(c.status));
   }
   const dept = String(department || "").trim();
-  return cards.filter((c) => (String(c.department || "").trim() || "Unspecified") === dept);
+  return cards.filter((c) => cardDepartment(c) === dept);
 }
 
 function openDrilldown({ month, status, department }) {
@@ -338,14 +366,14 @@ function openDrilldown({ month, status, department }) {
     ? `<div class="drilldown-grid">${cards.map(cardHtml).join("")}</div>`
     : `<p class="board-loading">No cards match this filter.</p>`;
   els.drilldown.hidden = false;
-  document.body.classList.add("drilldown-open");
+  els.viewBoard?.classList.add("drilldown-open");
   els.drilldownClose?.focus();
 }
 
 function closeDrilldown() {
   if (!els.drilldown || els.drilldown.hidden) return;
   els.drilldown.hidden = true;
-  document.body.classList.remove("drilldown-open");
+  els.viewBoard?.classList.remove("drilldown-open");
   if (els.drilldownBody) els.drilldownBody.innerHTML = "";
 }
 
@@ -387,7 +415,16 @@ els.tabs.forEach((tab) => {
 });
 
 if (els.refresh) els.refresh.addEventListener("click", () => loadBoard({ refresh: true }));
-if (els.deptFilter) els.deptFilter.addEventListener("change", () => loadBoard());
+if (els.deptFilter) {
+  els.deptFilter.addEventListener("change", () => {
+    if (lastBoard) {
+      els.boardError.hidden = true;
+      renderBoard(lastBoard);
+      return;
+    }
+    loadBoard();
+  });
+}
 
 els.kanban.addEventListener("click", (event) => {
   const toggle = event.target.closest(".completed-toggle");
